@@ -192,49 +192,19 @@ def _latest_reports_dir() -> str:
     return max(dirs, key=os.path.getmtime) if dirs else ""
 
 
-@cli.command()
-@click.option("--dir", "session_dir", default="", help="Recon oturum dizini (boşsa reports/ altındaki en son)")
-@click.option("--active", is_flag=True, default=False,
-              help="AKTİF test: bulunan parametrelere detection payload'ları bas (scope-içi, opt-in)")
-def triage(session_dir, active):
-    """🔎 Triyaj: recon çıktısını analiz et → tehlikeli param/dosya/tech işaretle.
-
-    --active ile bulunan parametreler XSS/SQLi/LFI/SSTI/redirect/CRLF/CMDi/SSRF için
-    scope-içi, non-destructive detection payload'larıyla test edilir (POTANSİYEL bulgu).
-
-    Örnekler:
-        python main.py triage
-        python main.py triage --dir reports/example.com_20260713_120000
-        python main.py triage --active
-    """
-    config = load_config()
-    if not session_dir:
-        session_dir = _latest_reports_dir()
-    if not session_dir or not os.path.isdir(session_dir):
-        console.print("[bold red]❌ Recon oturumu bulunamadı. Önce: python main.py recon <hedef>[/bold red]")
-        return
-
-    console.print(Panel(f"[bold cyan]🔎 Triyaj: {session_dir}[/bold cyan]", border_style="cyan"))
-    with console.status("[bold cyan]Recon çıktısı analiz ediliyor (param/dosya/tech)…[/bold cyan]",
-                        spinner="dots"):
-        result = Triage().analyze_dir(session_dir)
+def _render_triage(result: dict):
+    """Triyaj sonucunu (ilginç URL / tech / parametreli endpoint) konsola basar."""
     s = result["stats"]
     console.print(f"[dim]  {s['urls']} URL · {s['param_endpoints']} parametreli endpoint · "
                   f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti[/dim]")
-
-    # ── İfşa/ilginç URL'ler ──
     if result["interesting_urls"]:
         console.print("\n[bold yellow]⚠️  İlginç / İfşa URL'ler:[/bold yellow]")
         for it in result["interesting_urls"][:40]:
             console.print(f"  • ({it['reason']}) {it['url']}")
-
-    # ── Teknoloji ──
     if result["tech"]:
         console.print("\n[bold yellow]🧩 Teknoloji İşaretleri:[/bold yellow]")
         for t in result["tech"][:30]:
             console.print(f"  • {t['url']} — {t['note']} ({', '.join(t['tech'][:5])})")
-
-    # ── Parametreli endpoint'ler (aday vuln sınıfı) ──
     if result["param_targets"]:
         console.print("\n[bold yellow]🎯 Parametreli Endpoint'ler (aday vuln sınıfı):[/bold yellow]")
         for pt in result["param_targets"][:40]:
@@ -242,11 +212,9 @@ def triage(session_dir, active):
                 tag = ", ".join(classes) if classes else "genel"
                 console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
 
-    if not active:
-        console.print("\n[dim]  Aktif test için: python main.py triage --active[/dim]")
-        return
 
-    # ── AKTİF TEST ──
+def _run_active_test(result: dict, config: dict, session_dir: str):
+    """Aktif detection-payload testini çalıştırır (opt-in). POTANSİYEL bulguları kaydeder."""
     checker = _scope_checker(config)
     scope_cfg = config.get("scope", {}) or {}
     if not scope_cfg.get("allowed_targets") and not scope_cfg.get("scope_file"):
@@ -256,6 +224,9 @@ def triage(session_dir, active):
     if not fuzzer.available:
         console.print("[bold red]❌ 'requests' kurulu değil — aktif test yapılamıyor "
                       "(pip install requests).[/bold red]")
+        return
+    if not result["param_targets"]:
+        console.print("[dim]  Aktif test için parametreli endpoint yok — atlandı.[/dim]")
         return
 
     console.print(Panel(
@@ -283,6 +254,84 @@ def triage(session_dir, active):
     console.print(f"[dim]  Bulgular: {out_file}[/dim]")
     if findings:
         console.print("[dim]  Hepsi POTANSİYEL — Windsurf/Burp ile manuel doğrula.[/dim]")
+
+
+@cli.command()
+@click.option("--dir", "session_dir", default="", help="Recon oturum dizini (boşsa reports/ altındaki en son)")
+@click.option("--active", is_flag=True, default=False,
+              help="AKTİF test: bulunan parametrelere detection payload'ları bas (scope-içi, opt-in)")
+def triage(session_dir, active):
+    """🔎 Triyaj: recon çıktısını analiz et → tehlikeli param/dosya/tech işaretle.
+
+    --active ile bulunan parametreler XSS/SQLi/LFI/SSTI/redirect/CRLF/CMDi/SSRF için
+    scope-içi, non-destructive detection payload'larıyla test edilir (POTANSİYEL bulgu).
+
+    Örnekler:
+        python main.py triage
+        python main.py triage --dir reports/example.com_20260713_120000
+        python main.py triage --active
+    """
+    config = load_config()
+    if not session_dir:
+        session_dir = _latest_reports_dir()
+    if not session_dir or not os.path.isdir(session_dir):
+        console.print("[bold red]❌ Recon oturumu bulunamadı. Önce: python main.py recon <hedef>[/bold red]")
+        return
+
+    console.print(Panel(f"[bold cyan]🔎 Triyaj: {session_dir}[/bold cyan]", border_style="cyan"))
+    with console.status("[bold cyan]Recon çıktısı analiz ediliyor (param/dosya/tech)…[/bold cyan]",
+                        spinner="dots"):
+        result = Triage().analyze_dir(session_dir)
+    _render_triage(result)
+
+    if not active:
+        console.print("\n[dim]  Aktif test için: python main.py triage --active[/dim]")
+        return
+    _run_active_test(result, config, session_dir)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--passive", is_flag=True, default=False, help="Sadece pasif kaynaklar (aktif crawl/ffuf kapalı)")
+@click.option("--active", is_flag=True, default=False,
+              help="Triyaj sonrası AKTİF payload testi de yap (scope-içi, opt-in)")
+def hunt(target, passive, active):
+    """🎯 Hunt: TEK KOMUTTA recon → triyaj (→ opsiyonel aktif test).
+
+    recon (subdomain→httpx→ffuf→url→nuclei) + triyaj (param/dosya/tech) otomatik zincir.
+    --active eklersen bulunan parametreler detection payload'larıyla da test edilir.
+
+    Örnekler:
+        python main.py hunt example.com
+        python main.py hunt example.com --active
+    """
+    config = load_config()
+    from datetime import datetime
+    safe = target.replace("://", "_").replace("/", "_")
+    output_dir = os.path.join("reports", f"{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+
+    console.print(Panel(f"[bold magenta]🎯 Hunt başlatılıyor: {target}[/bold magenta]\n"
+                        f"[dim]recon → triyaj" + (" → aktif test" if active else "") + "[/dim]",
+                        border_style="magenta"))
+
+    # ── Aşama 1: recon ──
+    console.print("\n[bold cyan]▶ Aşama 1/2 — Recon[/bold cyan]")
+    parsed = _run_webrecon(target, config, output_dir, passive=(passive or None),
+                           reporter=ConsoleReporter(console))
+    console.print()
+    _print_summary(parsed, output_dir)
+
+    # ── Aşama 2: triyaj ──
+    console.print("\n[bold cyan]▶ Aşama 2/2 — Triyaj[/bold cyan]")
+    with console.status("[bold cyan]Recon çıktısı analiz ediliyor…[/bold cyan]", spinner="dots"):
+        result = Triage().analyze_dir(output_dir)
+    _render_triage(result)
+
+    if active:
+        _run_active_test(result, config, output_dir)
+    else:
+        console.print("\n[dim]  Aktif test için: python main.py hunt "
+                      f"{target} --active[/dim]")
 
 
 if __name__ == "__main__":

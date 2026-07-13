@@ -33,9 +33,16 @@ section() { echo -e "\n${C_CYAN}══════ $1 ══════${C_RESE
 have() { command -v "$1" >/dev/null 2>&1; }
 
 section "Durum Raporu"
-for t in subfinder dnsx httpx katana gau nuclei go python3 pip3; do
+for t in subfinder dnsx httpx katana gau nuclei ffuf go python3 pip3; do
     if have "$t"; then ok "$t"; else err "$t — YOK"; fi
 done
+# İçerik keşfi için wordlist (ffuf) — SecLists/dirb
+if [ -e /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt ] \
+   || [ -e /usr/share/wordlists/dirb/common.txt ]; then
+    ok "ffuf wordlist mevcut"
+else
+    warn "ffuf wordlist yok — kur: sudo apt install seclists  (veya dirb)"
+fi
 echo "$PATH" | tr ':' '\n' | grep -qx "$GOBIN_DIR" && ok "$GOBIN_DIR PATH'te" \
     || warn "$GOBIN_DIR PATH'te DEĞİL (go install ile kurulanlar çalışmaz — ~/.bashrc'ye ekleyin)"
 
@@ -54,6 +61,7 @@ if have go; then
     go_install katana    github.com/projectdiscovery/katana/cmd/katana@latest
     go_install gau       github.com/lc/gau/v2/cmd/gau@latest
     go_install nuclei    github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+    go_install ffuf      github.com/ffuf/ffuf/v2@latest
 else
     warn "go kurulu değil — kurulum: https://go.dev/doc/install"
     warn "sonra: export PATH=\$PATH:\$(go env GOPATH)/bin  (~/.bashrc'ye ekleyin)"

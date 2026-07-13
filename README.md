@@ -12,13 +12,19 @@ cp scope.txt.example scope.txt           # program scope'unu yaz
 
 ## Kullanım
 ```bash
-python main.py recon example.com                 # subdomain → httpx → URL → nuclei
-python main.py recon example.com --passive        # sadece pasif kaynaklar
+python main.py hunt example.com                  # TEK KOMUT: recon → triyaj (otomatik zincir)
+python main.py hunt example.com --active          #   + aktif detection payload testi (opt-in)
+python main.py recon example.com                 # subdomain → httpx → ffuf → URL → nuclei
+python main.py recon example.com --passive        # sadece pasif kaynaklar (crawl/ffuf kapalı)
 python main.py monitor example.com                # YENİ asset diff (baseline karşılaştırma)
 python main.py monitor example.com --diff-only
 python main.py triage                             # PASİF triyaj: tehlikeli param/dosya/tech işaretle
 python main.py triage --active                    # AKTİF: detection payload'ları (scope-içi, onay ister)
 ```
+
+**`hunt`** senin istediğin uçtan-uca akış: recon (subdomain→canlılık→**içerik keşfi/ffuf**→URL→nuclei)
+biter bitmez triyaj otomatik çalışır. `--active` eklersen bulunan parametreler payload'larla da
+test edilir. `recon`/`triage` ayrı ayrı da kullanılabilir.
 
 `triage --active` bulunan parametrelere **non-destructive detection payload'ları** basar
 (XSS/SQLi/LFI/SSTI/open-redirect/CRLF/CMDi/SSRF) — scope-gated, rate-limited. Bulgular
@@ -28,7 +34,7 @@ Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](d
 
 ## Mimari
 - `bugtool/scope.py` — kapsam kontrolü (domain wildcard + CIDR + scope dosyası)
-- `bugtool/webrecon.py` — recon pipeline (subfinder→dnsx→httpx→katana/gau→nuclei)
+- `bugtool/webrecon.py` — recon pipeline (subfinder→dnsx→httpx→katana/gau/**ffuf**→nuclei)
 - `bugtool/monitor.py` — baseline diff + webhook bildirimi
 - `bugtool/triage.py` — pasif çıktı analizi (tehlikeli param/dosya/tech)
 - `bugtool/payloads.py` — **tek-kaynak** payload arsenali + detektörler (encode/WAF-bypass)

@@ -14,15 +14,19 @@ scope:
   scope_file: "scope.txt"
 
 # ── Web Recon (DETERMİNİSTİK, LLM YOK) ─────────────────────
-# Aşamalar: subfinder → dnsx → httpx → (katana + gau) → nuclei. Binary yoksa aşama atlanır.
+# Aşamalar: subfinder → dnsx → httpx → (katana + gau + ffuf) → nuclei. Binary yoksa atlanır.
 webrecon:
-  passive_only: false          # true = aktif crawl (katana) kapalı; sadece pasif kaynaklar
-  rate_limit: 150              # httpx/nuclei istek/sn üst sınırı (sınırlı VM için düşür: 50)
-  concurrency: 25              # httpx/gau paralel thread (sınırlı VM için düşür: 10)
+  passive_only: false          # true = aktif crawl (katana) + ffuf kapalı; sadece pasif kaynaklar
+  rate_limit: 150              # httpx/nuclei/ffuf istek/sn üst sınırı (sınırlı VM için düşür: 50)
+  concurrency: 25              # httpx/gau/ffuf paralel thread (sınırlı VM için düşür: 10)
   nuclei_severity: "low,medium,high,critical"
   max_urls: 3000
   timeout: 600
-  stages: {}                   # aşama kapatma, örn: {nuclei: false, katana: false}
+  stages: {}                   # aşama kapatma, örn: {nuclei: false, katana: false, ffuf: false}
+  # İçerik keşfi / dizin brute (ffuf) — linklenmemiş /admin, /.git, /backup yollarını bulur
+  ffuf_wordlist: ""            # boşsa yaygın SecLists/dirb konumları otomatik denenir
+  ffuf_max_hosts: 10           # kaç canlı host'ta ffuf koşulsun (patlamayı önler)
+  ffuf_codes: "200,204,301,302,307,401,403,405,500"
 
 # ── Monitor (yeni-asset takibi) ────────────────────────────
 monitor:

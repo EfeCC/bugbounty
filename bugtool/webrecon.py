@@ -20,7 +20,9 @@ class WebRecon:
 
     def __init__(self, passive_only: bool = False, rate_limit: int = 150,
                  concurrency: int = 25, nuclei_severity: str = "low,medium,high,critical",
-                 timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None):
+                 timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None,
+                 ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
+                 ffuf_codes: str = "200,204,301,302,307,401,403,405,500"):
         self.passive_only = passive_only
         self.rate_limit = rate_limit
         self.concurrency = concurrency
@@ -28,6 +30,9 @@ class WebRecon:
         self.timeout = timeout
         self.max_urls = max_urls
         self.stages = stages or {}
+        self.ffuf_wordlist = ffuf_wordlist
+        self.ffuf_max_hosts = ffuf_max_hosts
+        self.ffuf_codes = ffuf_codes
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "WebRecon":
@@ -40,7 +45,42 @@ class WebRecon:
             timeout=int(wc.get("timeout", 600)),
             max_urls=int(wc.get("max_urls", 3000)),
             stages=dict(wc.get("stages", {}) or {}),
+            ffuf_wordlist=str(wc.get("ffuf_wordlist", "") or ""),
+            ffuf_max_hosts=int(wc.get("ffuf_max_hosts", 10)),
+            ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
         )
+
+    def _find_wordlist(self) -> str:
+        """ffuf wordlist yolunu bulur: config'teki, yoksa yaygın SecLists konumları."""
+        if self.ffuf_wordlist and os.path.exists(self.ffuf_wordlist):
+            return self.ffuf_wordlist
+        for cand in (
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/wordlists/dirb/common.txt",
+            "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+        ):
+            if os.path.exists(cand):
+                return cand
+        return ""
+
+    def _ffuf_host(self, host: str, wordlist: str) -> List[str]:
+        """Tek host'ta ffuf içerik keşfi (dizin/dosya brute). Bulunan yolları tam URL döner.
+        `-ac` (auto-calibrate) soft-404/wildcard cevaplarını eler → yanlış-pozitif azaltır."""
+        base = host.rstrip("/")
+        cmd = (f"ffuf -u {base}/FUZZ -w {wordlist} -mc {self.ffuf_codes} "
+               f"-ac -s -t {self.concurrency} -rate {self.rate_limit} -timeout 10")
+        r = run(cmd, timeout=self.timeout)
+        hits: List[str] = []
+        for line in self._lines(r["stdout"]):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(("http://", "https://")):
+                hits.append(line)
+            else:
+                hits.append(f"{base}/{line.lstrip('/')}")
+        return hits
 
     def _stage_on(self, stage: str, default: bool = True) -> bool:
         return bool(self.stages.get(stage, default))
@@ -157,12 +197,39 @@ class WebRecon:
         else:
             stages_skipped.append("gau")
             reporter.skip("Arşiv URL (gau) kurulu değil — atlandı")
+
+        # ── 4b. İçerik keşfi / dizin brute (ffuf) ────────────────────
+        # Linklenmemiş yolları bulur (/admin, /.git, /backup…). Canlı host başına,
+        # cap'li. Sadece GET + status-code — non-destructive. Wordlist/binary yoksa atlanır.
+        if not self.passive_only and self._stage_on("ffuf") and have("ffuf"):
+            wordlist = self._find_wordlist()
+            if not wordlist:
+                stages_skipped.append("ffuf")
+                reporter.skip("İçerik keşfi (ffuf): wordlist bulunamadı — atlandı "
+                              "(config → webrecon.ffuf_wordlist)")
+            else:
+                hosts = [h for h in live_urls if _in_scope(urlparse(h).hostname or "")]
+                hosts = hosts[: self.ffuf_max_hosts]
+                ffuf_hits: List[str] = []
+                with reporter.stage(f"İçerik keşfi (ffuf, {len(hosts)} host × wordlist)"):
+                    for host in hosts:
+                        ffuf_hits.extend(self._ffuf_host(host, wordlist))
+                urls.extend(ffuf_hits)
+                stages_run.append("ffuf")
+                reporter.done(f"{len(ffuf_hits)} gizli path/dosya (ffuf)")
+        else:
+            stages_skipped.append("ffuf")
+            if not have("ffuf"):
+                reporter.skip("İçerik keşfi (ffuf) kurulu değil — atlandı")
+            elif self.passive_only:
+                reporter.skip("İçerik keşfi (ffuf) atlandı (passive_only)")
+
         urls = self._dedup_scope_urls(urls, _in_scope)[: self.max_urls]
         urls_file = os.path.join(output_dir, "urls.txt")
         self._write_lines(urls_file, urls)
         endpoints = self._extract_endpoints(urls)
-        if "katana" in stages_run or "gau" in stages_run:
-            reporter.done(f"{len(urls)} URL · {len(endpoints)} endpoint", urls_file)
+        if any(s in stages_run for s in ("katana", "gau", "ffuf")):
+            reporter.done(f"{len(urls)} URL · {len(endpoints)} endpoint (toplam)", urls_file)
 
         # ── 5. nuclei ────────────────────────────────────────────────
         findings: List[Dict[str, Any]] = []

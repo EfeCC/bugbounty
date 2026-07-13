@@ -10,6 +10,7 @@ KATANA = "https://api.example.com/v1/users\nhttps://api.example.com/v1/login\n"
 GAU = "https://example.com/robots.txt\nhttps://api.example.com/v1/users\n"
 NUCLEI = ("[tech-detect] [http] [info] https://example.com\n"
           "[exposed-git] [http] [medium] https://api.example.com/.git/\n")
+FFUF = "admin\nbackup.zip\n"
 
 
 def _patch(monkeypatch, have=True):
@@ -19,7 +20,9 @@ def _patch(monkeypatch, have=True):
     def fake_run(cmd, timeout=300, **kw):
         c = cmd.lower()
         out = ""
-        if "subfinder" in c:
+        if "ffuf" in c:
+            out = FFUF
+        elif "subfinder" in c:
             out = SUBS
         elif "dnsx" in c:
             out = SUBS
@@ -68,6 +71,26 @@ def test_passive_only_skips_katana(monkeypatch, tmp_path):
     p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
     assert "katana" in p["stages_skipped"]
     assert "gau" in p["stages_run"]
+    assert "ffuf" in p["stages_skipped"]       # passive_only → ffuf de kapalı
+
+
+def test_ffuf_content_discovery(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    wl = tmp_path / "wl.txt"
+    wl.write_text("admin\nbackup.zip\n", encoding="utf-8")
+    wr = WebRecon(ffuf_wordlist=str(wl))
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path / "out"))
+    assert "ffuf" in p["stages_run"]
+    # ffuf ile bulunan linklenmemiş yollar urls'e girmeli
+    assert any(u.endswith("/admin") for u in p["urls"])
+    assert any(u.endswith("/backup.zip") for u in p["urls"])
+
+
+def test_ffuf_skipped_without_wordlist(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    wr = WebRecon()                            # wordlist yok (test ortamında SecLists yok)
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "ffuf" in p["stages_skipped"]
 
 
 def test_graceful_degrade_no_binaries(monkeypatch, tmp_path):

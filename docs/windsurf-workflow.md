@@ -24,13 +24,24 @@ cp scope.txt.example scope.txt                  # program scope'unu düzenle
 
 ## 1. Recon (deterministik, LLM'siz)
 ```bash
-python main.py recon example.com                 # subfinder→dnsx→httpx→katana+gau→nuclei
-python main.py recon example.com --passive       # aktif crawl kapalı (OPSEC / sınırlı kaynak)
+python main.py recon example.com                 # subfinder→dnsx→httpx→ffuf→katana+gau→nuclei
+python main.py recon example.com --passive       # aktif crawl + ffuf kapalı (OPSEC / sınırlı kaynak)
 ```
 Çıktı artifact'leri: `reports/<hedef>_<ts>/`
 - `subdomains.txt`, `resolved.txt`, `livehosts.txt`, `urls.txt`, `httpx.jsonl`, `nuclei.txt`
 
+**İçerik keşfi (ffuf)**: `httpx`'ten sonra canlı host'larda wordlist tabanlı dizin/dosya brute
+çalışır → linklenmemiş `/admin`, `/.git`, `/backup` gibi yolları bulur, `urls.txt`'e ekler.
+Wordlist config'ten (`webrecon.ffuf_wordlist`) ya da SecLists/dirb otomatik bulunur.
+
 Kurulu olmayan aracın aşaması **sessizce atlanır** — araç çökmez, kısmi sonuç verir.
+
+### Kestirme: `hunt` (recon → triyaj tek komut)
+```bash
+python main.py hunt example.com                  # recon + PASİF triyaj otomatik zincir
+python main.py hunt example.com --active          #   + aktif payload testi (onay ister)
+```
+`hunt` aşağıdaki 1→3 adımlarını tek komutta yapar; ayrı ayrı da çalıştırabilirsin.
 
 ## 2. Yeni-asset takibi (bug bounty edge'i)
 ```bash
