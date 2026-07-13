@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+
+# Runtime data (yeniden üretilebilir)
+reports/
+recon/
+*.log
+
+# Gerçek program scope'u (şablon değil)
+scope.txt
+
+# IDE
+.vscode/
+.idea/

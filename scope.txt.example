@@ -1,0 +1,19 @@
+# bugtool — Bug Bounty Scope Dosyası (ŞABLON)
+#
+# Kullanım: bu dosyayı `scope.txt` olarak kopyala, programın scope'unu yaz.
+# config.yaml'da scope.scope_file zaten "scope.txt" — ek ayar gerekmez.
+#
+# Kurallar:
+#   - Her satır bir giriş. `#` ile başlayan satırlar yorum, boş satırlar atlanır.
+#   - `*.example.com`  → apex (example.com) + TÜM subdomain izinli (wildcard).
+#   - `example.com`    → SADECE apex izinli (subdomain için `*.` kullan).
+#   - `!admin.example.com` → `!` ön eki = KAPSAM DIŞI (asla taranmaz), izinlileri ezmez.
+#   - CIDR de olur: `203.0.113.0/24`.
+
+# ── İzinli (in-scope) ──────────────────────────────────────────────
+*.example.com
+example.com
+
+# ── Kapsam dışı (out-of-scope) ─────────────────────────────────────
+!admin.example.com
+!internal.example.com

@@ -1,0 +1,32 @@
+# ═══════════════════════════════════════════════════════════
+# bugtool — Konfigürasyon
+# ═══════════════════════════════════════════════════════════
+
+# ── Kapsam (Scope) ─────────────────────────────────────────
+# Domain wildcard desteklenir: `*.example.com` → apex + tüm subdomain eşleşir.
+scope:
+  # Sadece bunlar taranabilir (boşsa tüm hedefler geçerli)
+  allowed_targets: []
+  # Bu hedefler ASLA taranmaz
+  excluded_targets: []
+  # Bug bounty program scope'unu harici dosyadan yükle (bu dosyayı düzenlemeden).
+  # Satır formatı: `example.com` / `*.example.com` = izinli; `!admin.example.com` = yasak.
+  scope_file: "scope.txt"
+
+# ── Web Recon (DETERMİNİSTİK, LLM YOK) ─────────────────────
+# Aşamalar: subfinder → dnsx → httpx → (katana + gau) → nuclei. Binary yoksa aşama atlanır.
+webrecon:
+  passive_only: false          # true = aktif crawl (katana) kapalı; sadece pasif kaynaklar
+  rate_limit: 150              # httpx/nuclei istek/sn üst sınırı (sınırlı VM için düşür: 50)
+  concurrency: 25              # httpx/gau paralel thread (sınırlı VM için düşür: 10)
+  nuclei_severity: "low,medium,high,critical"
+  max_urls: 3000
+  timeout: 600
+  stages: {}                   # aşama kapatma, örn: {nuclei: false, katana: false}
+
+# ── Monitor (yeni-asset takibi) ────────────────────────────
+monitor:
+  baseline_dir: "recon"
+  notify: false
+  webhook_url: null            # Slack/Teams/generic webhook URL (opsiyonel)
+  webhook_format: "generic"    # generic | slack | teams
