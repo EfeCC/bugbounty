@@ -19,6 +19,7 @@ from bugtool.monitor import AssetMonitor
 from bugtool.scope import ScopeChecker
 from bugtool.triage import Triage
 from bugtool.fuzzer import ParamFuzzer
+from bugtool.reporter import ConsoleReporter
 
 console = Console()
 
@@ -41,7 +42,8 @@ def _scope_checker(config: dict) -> ScopeChecker:
                         excluded=sc.get("excluded_targets", []))
 
 
-def _run_webrecon(target: str, config: dict, output_dir: str, passive: bool = None) -> dict:
+def _run_webrecon(target: str, config: dict, output_dir: str, passive: bool = None,
+                  reporter=None) -> dict:
     wr = WebRecon.from_config(config)
     if passive is not None:
         wr.passive_only = passive
@@ -49,7 +51,8 @@ def _run_webrecon(target: str, config: dict, output_dir: str, passive: bool = No
     if not checker.is_in_scope(target):
         raise click.ClickException(
             f"KAPSAM DIŞI: {target} — scope.txt / config.yaml → scope bölümünü kontrol edin.")
-    return wr.run_pipeline(target, output_dir=output_dir, scope_checker=checker.is_in_scope)
+    return wr.run_pipeline(target, output_dir=output_dir, scope_checker=checker.is_in_scope,
+                           reporter=reporter)
 
 
 def _print_summary(parsed: dict, output_dir: str):
@@ -71,7 +74,7 @@ def _print_summary(parsed: dict, output_dir: str):
     if findings:
         console.print("\n[bold yellow]Nuclei Bulguları:[/bold yellow]")
         for f in findings[:30]:
-            console.print(f"  • [{f['severity']}] {f['title']} — {f.get('evidence', '')[:100]}")
+            console.print(f"  • ({f['severity']}) {f['title']} — {f.get('evidence', '')[:100]}")
 
 
 def _print_monitor_delta(scope: str, delta: dict, first_run: bool = False):
@@ -123,7 +126,9 @@ def recon(target, output_dir, passive):
         safe = target.replace("://", "_").replace("/", "_")
         output_dir = os.path.join("reports", f"{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     console.print(Panel(f"[bold cyan]🌐 Web Recon başlatılıyor: {target}[/bold cyan]", border_style="cyan"))
-    parsed = _run_webrecon(target, config, output_dir, passive=(passive or None))
+    parsed = _run_webrecon(target, config, output_dir, passive=(passive or None),
+                           reporter=ConsoleReporter(console))
+    console.print()
     _print_summary(parsed, output_dir)
 
 
@@ -160,7 +165,9 @@ def monitor(scope, passive, diff_only, notify):
 
     console.print(Panel(f"[bold cyan]🔭 Monitor: {scope}[/bold cyan]", border_style="cyan"))
     output_dir = os.path.join(mcfg.get("baseline_dir", "recon"), "_scan_tmp")
-    parsed = _run_webrecon(scope, config, output_dir, passive=(passive or None))
+    parsed = _run_webrecon(scope, config, output_dir, passive=(passive or None),
+                           reporter=ConsoleReporter(console))
+    console.print()
     snap = mon.snapshot(parsed)
     old = mon.load_latest()
     delta = mon.diff(old, snap)
@@ -208,7 +215,9 @@ def triage(session_dir, active):
         return
 
     console.print(Panel(f"[bold cyan]🔎 Triyaj: {session_dir}[/bold cyan]", border_style="cyan"))
-    result = Triage().analyze_dir(session_dir)
+    with console.status("[bold cyan]Recon çıktısı analiz ediliyor (param/dosya/tech)…[/bold cyan]",
+                        spinner="dots"):
+        result = Triage().analyze_dir(session_dir)
     s = result["stats"]
     console.print(f"[dim]  {s['urls']} URL · {s['param_endpoints']} parametreli endpoint · "
                   f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti[/dim]")
@@ -259,7 +268,12 @@ def triage(session_dir, active):
         console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
                       f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
 
-    findings = fuzzer.fuzz_targets(result["param_targets"], on_finding=_report)
+    with console.status("[bold red]Aktif test başlıyor…[/bold red]", spinner="dots") as status:
+        def _progress(i, total, sent, nf):
+            status.update(f"[bold red]Aktif test — {i}/{total} endpoint · {sent} istek · "
+                          f"{nf} POTANSİYEL bulgu[/bold red]")
+        findings = fuzzer.fuzz_targets(result["param_targets"],
+                                       on_finding=_report, on_progress=_progress)
 
     console.print(f"\n[bold]Aktif test bitti — {fuzzer._sent} istek, "
                   f"{len(findings)} POTANSİYEL bulgu.[/bold]")

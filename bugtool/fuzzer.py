@@ -76,19 +76,27 @@ class ParamFuzzer:
 
     # ── Ana giriş ─────────────────────────────────────────────────────────────
     def fuzz_targets(self, param_targets: List[Dict[str, Any]],
-                     on_finding: Optional[Callable[[Dict], None]] = None) -> List[Dict[str, Any]]:
-        """triage.param_targets listesini test eder. POTANSİYEL bulgu listesi döner."""
+                     on_finding: Optional[Callable[[Dict], None]] = None,
+                     on_progress: Optional[Callable[[int, int, int, int], None]] = None
+                     ) -> List[Dict[str, Any]]:
+        """triage.param_targets listesini test eder. POTANSİYEL bulgu listesi döner.
+        `on_progress(index, total, sent, nfindings)` her endpoint sonrası çağrılır (canlı sayaç)."""
         findings: List[Dict[str, Any]] = []
         if not self.available:
             return findings
-        for target in param_targets:
+        total = len(param_targets)
+        for i, target in enumerate(param_targets, 1):
             if self._sent >= self.max_requests:
                 break
             url = target.get("url", "")
             if not url or not self._in_scope(url):
+                if on_progress:
+                    on_progress(i, total, self._sent, len(findings))
                 continue
             baseline = self._request(url)
             if baseline is None:
+                if on_progress:
+                    on_progress(i, total, self._sent, len(findings))
                 continue
             for param, hinted in (target.get("params") or {}).items():
                 classes = self._classes_for(hinted)
@@ -98,6 +106,8 @@ class ParamFuzzer:
                         on_finding(finding)
                     if self._sent >= self.max_requests:
                         return findings
+            if on_progress:
+                on_progress(i, total, self._sent, len(findings))
         return findings
 
     def _classes_for(self, hinted: List[str]) -> List[str]:

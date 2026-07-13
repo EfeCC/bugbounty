@@ -56,13 +56,19 @@ class WebRecon:
         return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
 
     def run_pipeline(self, target: str, output_dir: str = "",
-                     scope_checker: Optional[Callable[[str], bool]] = None) -> Dict[str, Any]:
+                     scope_checker: Optional[Callable[[str], bool]] = None,
+                     reporter: Optional[Any] = None) -> Dict[str, Any]:
         """Pipeline'ı çalıştırır. `scope_checker(host)->bool` verilirse kapsam-dışı
-        subdomain'ler tarama listesinden düşürülür."""
+        subdomain'ler tarama listesinden düşürülür. `reporter` verilirse her aşama için
+        canlı ilerleme (spinner + sonuç + kaydedilen yol) basar (yoksa sessiz)."""
+        if reporter is None:
+            from .reporter import NullReporter
+            reporter = NullReporter()
         domain = self._bare_domain(target)
         if not output_dir:
             output_dir = tempfile.mkdtemp(prefix="webrecon_")
         os.makedirs(output_dir, exist_ok=True)
+        reporter.info(f"Hedef: {domain} · çıktı: {output_dir}")
 
         stages_run: List[str] = []
         stages_skipped: List[str] = []
@@ -78,11 +84,13 @@ class WebRecon:
         # ── 1. Subdomain enumerasyonu (subfinder) ──────────────────
         subdomains: List[str] = []
         if self._stage_on("subfinder") and have("subfinder"):
-            r = run(f"subfinder -d {domain} -silent", timeout=self.timeout)
-            subdomains = self._lines(r["stdout"])
+            with reporter.stage("Subdomain aranıyor (subfinder)"):
+                r = run(f"subfinder -d {domain} -silent", timeout=self.timeout)
+                subdomains = self._lines(r["stdout"])
             stages_run.append("subfinder")
         else:
             stages_skipped.append("subfinder")
+            reporter.skip("Subdomain: subfinder kurulu değil — atlandı (yalnızca apex)")
         if domain not in subdomains:
             subdomains.insert(0, domain)
         seen = set()
@@ -90,31 +98,40 @@ class WebRecon:
                       if s not in seen and not seen.add(s) and _in_scope(s)]
         subs_file = os.path.join(output_dir, "subdomains.txt")
         self._write_lines(subs_file, subdomains)
+        if "subfinder" in stages_run:
+            reporter.done(f"{len(subdomains)} subdomain (scope-içi) bulundu", subs_file)
 
         # ── 2. DNS çözümleme (dnsx) ─────────────────────────────────
         resolved = subdomains
         if self._stage_on("dnsx") and len(subdomains) > 1 and have("dnsx"):
-            r = run(f"dnsx -l {subs_file} -silent", timeout=self.timeout)
-            got = [h for h in self._lines(r["stdout"]) if _in_scope(h)]
+            with reporter.stage("Canlı subdomain'ler çözümleniyor (dnsx)"):
+                r = run(f"dnsx -l {subs_file} -silent", timeout=self.timeout)
+                got = [h for h in self._lines(r["stdout"]) if _in_scope(h)]
             if got:
                 resolved = got
             stages_run.append("dnsx")
+            reporter.done(f"{len(resolved)} çözülen (canlı) subdomain")
         else:
             stages_skipped.append("dnsx")
+            reporter.skip("DNS çözümleme (dnsx) atlandı")
         resolved_file = os.path.join(output_dir, "resolved.txt")
         self._write_lines(resolved_file, resolved)
 
         # ── 3. HTTP probe (httpx) ────────────────────────────────────
         live_hosts: List[Dict[str, Any]] = []
         if self._stage_on("httpx") and have("httpx"):
-            cmd = (f"httpx -l {resolved_file} -silent -sc -title -tech-detect -json "
-                   f"-rl {self.rate_limit} -threads {self.concurrency}")
-            r = run(cmd, timeout=self.timeout)
-            live_hosts = self._parse_httpx(r["stdout"])
-            self._write_raw(os.path.join(output_dir, "httpx.jsonl"), r["stdout"])
+            with reporter.stage(f"HTTP servisleri taranıyor (httpx, {len(resolved)} host)"):
+                cmd = (f"httpx -l {resolved_file} -silent -sc -title -tech-detect -json "
+                       f"-rl {self.rate_limit} -threads {self.concurrency}")
+                r = run(cmd, timeout=self.timeout)
+                live_hosts = self._parse_httpx(r["stdout"])
+                self._write_raw(os.path.join(output_dir, "httpx.jsonl"), r["stdout"])
             stages_run.append("httpx")
+            reporter.done(f"{len(live_hosts)} canlı web servisi",
+                          os.path.join(output_dir, "httpx.jsonl"))
         else:
             stages_skipped.append("httpx")
+            reporter.skip("HTTP probe (httpx) kurulu değil — atlandı")
         live_urls = [h["url"] for h in live_hosts if h.get("url")]
         if not live_urls:
             live_urls = [f"https://{h}" for h in resolved[:50]]
@@ -124,32 +141,44 @@ class WebRecon:
         # ── 4. URL/endpoint hasadı (katana aktif + gau pasif) ───────
         urls: List[str] = []
         if not self.passive_only and self._stage_on("katana") and have("katana"):
-            r = run(f"katana -list {live_file} -silent -jc -d 2", timeout=self.timeout)
-            urls.extend(self._lines(r["stdout"]))
+            with reporter.stage("URL/endpoint toplanıyor (katana — aktif crawl)"):
+                r = run(f"katana -list {live_file} -silent -jc -d 2", timeout=self.timeout)
+                urls.extend(self._lines(r["stdout"]))
             stages_run.append("katana")
         else:
             stages_skipped.append("katana")
+            reporter.skip("URL crawl (katana) atlandı" +
+                          (" (passive_only)" if self.passive_only else ""))
         if self._stage_on("gau") and have("gau"):
-            r = run(f"gau --threads {self.concurrency} {domain}", timeout=self.timeout)
-            urls.extend(self._lines(r["stdout"]))
+            with reporter.stage("Arşiv URL'leri toplanıyor (gau — pasif)"):
+                r = run(f"gau --threads {self.concurrency} {domain}", timeout=self.timeout)
+                urls.extend(self._lines(r["stdout"]))
             stages_run.append("gau")
         else:
             stages_skipped.append("gau")
+            reporter.skip("Arşiv URL (gau) kurulu değil — atlandı")
         urls = self._dedup_scope_urls(urls, _in_scope)[: self.max_urls]
-        self._write_lines(os.path.join(output_dir, "urls.txt"), urls)
+        urls_file = os.path.join(output_dir, "urls.txt")
+        self._write_lines(urls_file, urls)
         endpoints = self._extract_endpoints(urls)
+        if "katana" in stages_run or "gau" in stages_run:
+            reporter.done(f"{len(urls)} URL · {len(endpoints)} endpoint", urls_file)
 
         # ── 5. nuclei ────────────────────────────────────────────────
         findings: List[Dict[str, Any]] = []
         if self._stage_on("nuclei") and live_urls and have("nuclei"):
-            cmd = (f"nuclei -l {live_file} -silent -severity {self.nuclei_severity} "
-                   f"-no-color -rl {self.rate_limit}")
-            r = run(cmd, timeout=self.timeout)
-            self._write_raw(os.path.join(output_dir, "nuclei.txt"), r["stdout"])
-            findings = self._parse_nuclei(r["stdout"])
+            with reporter.stage(f"Zafiyet taraması (nuclei, {len(live_urls)} host)"):
+                cmd = (f"nuclei -l {live_file} -silent -severity {self.nuclei_severity} "
+                       f"-no-color -rl {self.rate_limit}")
+                r = run(cmd, timeout=self.timeout)
+                self._write_raw(os.path.join(output_dir, "nuclei.txt"), r["stdout"])
+                findings = self._parse_nuclei(r["stdout"])
             stages_run.append("nuclei")
+            reporter.done(f"{len(findings)} nuclei bulgusu",
+                          os.path.join(output_dir, "nuclei.txt"))
         else:
             stages_skipped.append("nuclei")
+            reporter.skip("Zafiyet taraması (nuclei) kurulu değil — atlandı")
 
         return {
             "domain": domain,
