@@ -44,7 +44,26 @@ Baseline'lar `recon/<scope>/` altında. Cron ile günlük çalıştır → yeni 
 0 7 * * * cd /path/to/bugtool && /usr/bin/python3 main.py monitor example.com --notify >> recon/monitor.log 2>&1
 ```
 
-## 3. Windsurf'te analiz (AI'ı BURADA kullan)
+## 3. Triyaj — deterministik ön-analiz (AI'a gitmeden)
+Recon'dan sonra, AI'a hiç danışmadan tehlikeli parametre/dosya/tech'i script işaretler:
+```bash
+python main.py triage                            # en son recon oturumunu analiz et (PASİF, ağ yok)
+python main.py triage --dir reports/<oturum>
+```
+Çıktı: ifşa dosyalar (.git/.env/backup), ilginç endpoint'ler (admin/api/graphql), tehlikeli
+parametreler (id→sqli, redirect→open_redirect, file→lfi, q→xss…), versiyonlu teknoloji.
+
+### 3b. Aktif test (opt-in, onay ister)
+Bulunan parametrelere **non-destructive detection payload'ları** basar (XSS/SQLi/LFI/SSTI/
+open-redirect/CRLF/CMDi/SSRF). SCOPE-GATED, rate-limited. Payload'lar `bugtool/payloads.py`'de
+(tek kaynak, encode/WAF-bypass varyantlı). **Yalnızca yetkili scope'ta çalıştır:**
+```bash
+python main.py triage --active                   # scope-içi host'lara detection payload'ları
+```
+Bulgular `reports/<oturum>/triage_findings.json` — hepsi **POTANSİYEL**, manuel doğrulama şart
+(zaman-tabanlı SQLi/CMDi ikinci istekle teyit edilir; XSS yalnızca HAM yansımada işaretlenir).
+
+## 4. Windsurf'te derin analiz (AI'ı BURADA kullan)
 1. Windsurf'ü repo kökünde aç — `.windsurfrules` otomatik yüklenir (scope disiplini).
 2. Cascade'e artifact'leri ver, örnek promptlar:
    - *"`reports/<oturum>/httpx.jsonl`'deki host'lardan hangi 15'i manuel bakmaya değer, neden?"*
@@ -52,11 +71,11 @@ Baseline'lar `recon/<scope>/` altında. Cron ile günlük çalıştır → yeni 
    - *"Bu endpoint için IDOR/BOLA test matrisi çıkar."*
 3. Cascade her aday için `{asset, neden ilginç, test adımı, tahmini impact}` üretir (kurallarda tanımlı).
 
-## 4. Manuel test + doğrulama (sen)
-Cascade'in önceliklendirdiği adayları **elle** test et (Burp/curl/tarayıcı). bugtool sömürü
-yapmaz — bu adım tamamen senin elinde.
+## 5. Manuel test + doğrulama (sen)
+Cascade'in ve `triage_findings.json`'un önceliklendirdiği adayları **elle** test et
+(Burp/curl/tarayıcı). Otomatik bulgular POTANSİYEL — asıl kanıtı (PoC) sen üretirsin.
 
-## 5. Rapor
+## 6. Rapor
 PoC bulunca Cascade'e: *"bunu HackerOne rapor formatında yaz (impact + adımlar + remediation)."*
 
 ## Rol dağılımı özeti
@@ -64,6 +83,8 @@ PoC bulunca Cascade'e: *"bunu HackerOne rapor formatında yaz (impact + adımlar
 |---|---|---|
 | Subdomain/URL/nuclei recon | `recon`/`monitor` (deterministik) | Hızlı, tekrarlanabilir, token yakmaz |
 | Yeni asset tespiti | `monitor` (cron) | Yeni scope'ta ilk olmak = az dupe |
+| Param/dosya/tech triyajı | `triage` (deterministik) | AI'a gitmeden ilginç %1'i eler |
+| Detection payload testi | `triage --active` (deterministik) | XSS/SQLi/LFI… POTANSİYEL aday |
 | Triyaj / önceliklendirme | Windsurf (AI) | Yüzlerce host'tan ilginç %1 |
 | Business-logic bug | Sen (manuel) | Scanner/AI bulamaz — asıl para burada |
 | Rapor yazımı | Windsurf (AI) | Hızlı, tutarlı |

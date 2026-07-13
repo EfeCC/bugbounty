@@ -16,8 +16,13 @@ python main.py recon example.com                 # subdomain → httpx → URL �
 python main.py recon example.com --passive        # sadece pasif kaynaklar
 python main.py monitor example.com                # YENİ asset diff (baseline karşılaştırma)
 python main.py monitor example.com --diff-only
-python main.py monitor example.com --notify
+python main.py triage                             # PASİF triyaj: tehlikeli param/dosya/tech işaretle
+python main.py triage --active                    # AKTİF: detection payload'ları (scope-içi, onay ister)
 ```
+
+`triage --active` bulunan parametrelere **non-destructive detection payload'ları** basar
+(XSS/SQLi/LFI/SSTI/open-redirect/CRLF/CMDi/SSRF) — scope-gated, rate-limited. Bulgular
+`reports/<oturum>/triage_findings.json`'a POTANSİYEL olarak yazılır (manuel doğrulama şart).
 
 Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](docs/windsurf-workflow.md)
 
@@ -25,8 +30,16 @@ Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](d
 - `bugtool/scope.py` — kapsam kontrolü (domain wildcard + CIDR + scope dosyası)
 - `bugtool/webrecon.py` — recon pipeline (subfinder→dnsx→httpx→katana/gau→nuclei)
 - `bugtool/monitor.py` — baseline diff + webhook bildirimi
+- `bugtool/triage.py` — pasif çıktı analizi (tehlikeli param/dosya/tech)
+- `bugtool/payloads.py` — **tek-kaynak** payload arsenali + detektörler (encode/WAF-bypass)
+- `bugtool/fuzzer.py` — aktif param testi (scope-gated, non-destructive detection)
 - `bugtool/shell.py` — subprocess yardımcı katmanı
 - `main.py` — CLI (click)
+
+## Güvenlik notu
+Yalnızca **yetkili** hedeflerde (kendi scope.txt'in) kullan. `triage --active` aktif trafik
+üretir; payload'lar zarar vermeyecek şekilde tasarlandı (SLEEP/marker/aritmetik — yıkıcı komut
+yok) ama yine de yalnızca test etme yetkin olan sistemlerde çalıştır.
 
 ## Test
 ```bash

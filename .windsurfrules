@@ -20,14 +20,18 @@ sömürü komutu içermiyor.
 ## 3. İzinli (otomatik yapabilirsin — hepsi read-only / pasif)
 - `python main.py recon <domain>`   — subdomain→httpx→url→nuclei (deterministik, LLM'siz)
 - `python main.py monitor <domain>` — yeni-asset diff
+- `python main.py triage`           — PASİF triyaj (ağ yok, sadece artifact okur/işaretler)
 - `reports/`, `recon/` altındaki artifact dosyalarını okumak (subdomains.txt, httpx.jsonl,
-  urls.txt, nuclei.txt)
+  urls.txt, nuclei.txt, triage_findings.json)
 - subfinder/httpx/nuclei/katana/gau gibi araçların pasif/read-only çağrıları
 
-## 4. Kullanıcı ONAYI gerektirir
+## 4. Kullanıcı ONAYI gerektirir (önce sor, "evet" bekle)
+- **`python main.py triage --active`** — hedefe DETECTION PAYLOAD'ları gönderir (aktif test).
+  Non-destructive ve scope-gated olsa da AKTİF trafik ürettiği için kullanıcı onayı şart.
 - Bu repo dışında herhangi bir aktif sömürü/payload gönderimi, kimlik doğrulama denemesi,
   form submit, state değiştiren istek
 - Scope'a yeni hedef eklemek
+- `triage_findings.json`'daki POTANSİYEL bulguları "kesin" gibi raporlamak — hepsi manuel doğrulama bekler
 
 ## 5. Çıktı formatı (bulgu sunarken)
 Her aday için şu dört alanı ver:

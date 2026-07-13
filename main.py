@@ -17,6 +17,8 @@ from rich.table import Table
 from bugtool.webrecon import WebRecon
 from bugtool.monitor import AssetMonitor
 from bugtool.scope import ScopeChecker
+from bugtool.triage import Triage
+from bugtool.fuzzer import ParamFuzzer
 
 console = Console()
 
@@ -172,6 +174,101 @@ def monitor(scope, passive, diff_only, notify):
             mon.notify_webhook(delta, webhook_url, mcfg.get("webhook_format", "generic"))
         else:
             console.print("[yellow]  ⚠ --notify verildi ama config.yaml → monitor.webhook_url boş.[/yellow]")
+
+
+def _latest_reports_dir() -> str:
+    base = "reports"
+    if not os.path.isdir(base):
+        return ""
+    dirs = [os.path.join(base, d) for d in os.listdir(base)
+            if os.path.isdir(os.path.join(base, d))]
+    return max(dirs, key=os.path.getmtime) if dirs else ""
+
+
+@cli.command()
+@click.option("--dir", "session_dir", default="", help="Recon oturum dizini (boşsa reports/ altındaki en son)")
+@click.option("--active", is_flag=True, default=False,
+              help="AKTİF test: bulunan parametrelere detection payload'ları bas (scope-içi, opt-in)")
+def triage(session_dir, active):
+    """🔎 Triyaj: recon çıktısını analiz et → tehlikeli param/dosya/tech işaretle.
+
+    --active ile bulunan parametreler XSS/SQLi/LFI/SSTI/redirect/CRLF/CMDi/SSRF için
+    scope-içi, non-destructive detection payload'larıyla test edilir (POTANSİYEL bulgu).
+
+    Örnekler:
+        python main.py triage
+        python main.py triage --dir reports/example.com_20260713_120000
+        python main.py triage --active
+    """
+    config = load_config()
+    if not session_dir:
+        session_dir = _latest_reports_dir()
+    if not session_dir or not os.path.isdir(session_dir):
+        console.print("[bold red]❌ Recon oturumu bulunamadı. Önce: python main.py recon <hedef>[/bold red]")
+        return
+
+    console.print(Panel(f"[bold cyan]🔎 Triyaj: {session_dir}[/bold cyan]", border_style="cyan"))
+    result = Triage().analyze_dir(session_dir)
+    s = result["stats"]
+    console.print(f"[dim]  {s['urls']} URL · {s['param_endpoints']} parametreli endpoint · "
+                  f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti[/dim]")
+
+    # ── İfşa/ilginç URL'ler ──
+    if result["interesting_urls"]:
+        console.print("\n[bold yellow]⚠️  İlginç / İfşa URL'ler:[/bold yellow]")
+        for it in result["interesting_urls"][:40]:
+            console.print(f"  • ({it['reason']}) {it['url']}")
+
+    # ── Teknoloji ──
+    if result["tech"]:
+        console.print("\n[bold yellow]🧩 Teknoloji İşaretleri:[/bold yellow]")
+        for t in result["tech"][:30]:
+            console.print(f"  • {t['url']} — {t['note']} ({', '.join(t['tech'][:5])})")
+
+    # ── Parametreli endpoint'ler (aday vuln sınıfı) ──
+    if result["param_targets"]:
+        console.print("\n[bold yellow]🎯 Parametreli Endpoint'ler (aday vuln sınıfı):[/bold yellow]")
+        for pt in result["param_targets"][:40]:
+            for name, classes in pt["params"].items():
+                tag = ", ".join(classes) if classes else "genel"
+                console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
+
+    if not active:
+        console.print("\n[dim]  Aktif test için: python main.py triage --active[/dim]")
+        return
+
+    # ── AKTİF TEST ──
+    checker = _scope_checker(config)
+    scope_cfg = config.get("scope", {}) or {}
+    if not scope_cfg.get("allowed_targets") and not scope_cfg.get("scope_file"):
+        console.print("[yellow]  ⚠ scope tanımlı değil (scope.txt yok) — yalnızca kendi recon "
+                      "hedefine ait host'ları test ettiğinden emin ol.[/yellow]")
+    fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)
+    if not fuzzer.available:
+        console.print("[bold red]❌ 'requests' kurulu değil — aktif test yapılamıyor "
+                      "(pip install requests).[/bold red]")
+        return
+
+    console.print(Panel(
+        f"[bold red]⚡ AKTİF TEST[/bold red] — {len(result['param_targets'])} endpoint, "
+        f"max {fuzzer.max_requests} istek, delay {fuzzer.delay}s.\n"
+        f"[dim]Non-destructive detection payload'ları · yalnızca scope-içi host'lar.[/dim]",
+        border_style="red"))
+
+    def _report(f):
+        console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
+                      f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
+
+    findings = fuzzer.fuzz_targets(result["param_targets"], on_finding=_report)
+
+    console.print(f"\n[bold]Aktif test bitti — {fuzzer._sent} istek, "
+                  f"{len(findings)} POTANSİYEL bulgu.[/bold]")
+    out_file = os.path.join(session_dir, "triage_findings.json")
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump({"findings": findings}, f, indent=2, ensure_ascii=False)
+    console.print(f"[dim]  Bulgular: {out_file}[/dim]")
+    if findings:
+        console.print("[dim]  Hepsi POTANSİYEL — Windsurf/Burp ile manuel doğrula.[/dim]")
 
 
 if __name__ == "__main__":

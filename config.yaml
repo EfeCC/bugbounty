@@ -30,3 +30,14 @@ monitor:
   notify: false
   webhook_url: null            # Slack/Teams/generic webhook URL (opsiyonel)
   webhook_format: "generic"    # generic | slack | teams
+
+# ── Aktif Test / Fuzzer (triage --active) ──────────────────
+# Parametrelere non-destructive DETECTION payload'ları basar. SCOPE-GATED + opt-in.
+# Payload'lar bugtool/payloads.py'de (tek kaynak). Sonuçlar POTANSİYEL — manuel doğrula.
+fuzz:
+  max_requests: 500            # oturum başına toplam istek üst sınırı (blast-radius)
+  delay: 0.0                   # istekler arası bekleme (sn) — hedefi yormamak/rate-limit için artır
+  timeout: 10                  # istek zaman aşımı (sn)
+  verify_tls: false            # self-signed sertifikalarda hata verme
+  test_all_if_no_hint: true    # param adı ipucu vermezse TÜM sınıfları dene ("ne olursa")
+  classes: null                # null = tüm sınıflar; örn ["xss","sqli","lfi"] ile daralt
