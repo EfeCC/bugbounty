@@ -49,5 +49,7 @@ fuzz:
   delay: 0.0                   # istekler arası bekleme (sn) — hedefi yormamak/rate-limit için artır
   timeout: 10                  # istek zaman aşımı (sn)
   verify_tls: false            # self-signed sertifikalarda hata verme
-  test_all_if_no_hint: true    # param adı ipucu vermezse TÜM sınıfları dene ("ne olursa")
+  block_threshold: 8           # art arda bu kadar 403/429 gelince backoff (WAF/rate-limit) → dur
+  test_all_if_no_hint: true    # true = ipucu olmayan param'da da TÜM sınıfları dene ("ne olursa");
+                               # false = sadece xss/sqli/redirect (akıllı bütçe, sınırlı VM için)
   classes: null                # null = tüm sınıflar; örn ["xss","sqli","lfi"] ile daralt

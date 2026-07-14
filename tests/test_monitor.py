@@ -32,6 +32,19 @@ def test_diff_new_only(tmp_path):
     assert mon.has_changes(delta) is True
 
 
+def test_diff_tracks_removed(tmp_path):
+    # Artık canlı olmayan host / kaybolan bulgu da izlenmeli (yama sinyali)
+    mon = AssetMonitor("example.com", baseline_dir=str(tmp_path))
+    old = mon.snapshot(_parsed(["a.example.com"],
+                               hosts=["https://a.example.com", "https://b.example.com"],
+                               findings=["Nuclei: exposed-git"]))
+    new = mon.snapshot(_parsed(["a.example.com"], hosts=["https://a.example.com"]))
+    delta = mon.diff(old, new)
+    assert "https://b.example.com" in delta["gone_live_hosts"]
+    assert "Nuclei: exposed-git" in delta["gone_findings"]
+    assert mon.has_changes(delta) is True
+
+
 def test_first_run_everything_new(tmp_path):
     mon = AssetMonitor("x.com", baseline_dir=str(tmp_path))
     assert mon.load_latest() is None

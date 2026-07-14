@@ -91,6 +91,8 @@ def _print_monitor_delta(scope: str, delta: dict, first_run: bool = False):
         ("new_subdomains", "🆕 Yeni Subdomain"),
         ("new_endpoints", "🆕 Yeni Endpoint"),
         ("new_findings", "🆕 Yeni Nuclei Bulgusu"),
+        ("gone_live_hosts", "📴 Artık Canlı Olmayan Host"),
+        ("gone_findings", "✅ Artık Görünmeyen Bulgu (yama?)"),
     ]
     for key, title in labels:
         items = delta.get(key, [])

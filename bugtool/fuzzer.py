@@ -10,6 +10,18 @@ GÜVENLİK ÇERÇEVESİ (bunlar aracın DNA'sı, atlanamaz):
   - Sonuçlar "POTANSİYEL, doğrulanmadı" etiketli — insan doğrulaması şart.
 
 requests kurulu değilse araç kendini devre dışı bırakır (graceful-degrade), asla çökmez.
+
+Bu turda düzeltilenler:
+  - Timeout artık `None` dönüp sinyali silmiyor (zaman-tabanlı bulgular kaybolmuyordu).
+  - `requests.Session()` yeniden kullanılıyor (TCP/TLS handshake tekrarı yok, daha hızlı
+    ve hedefe daha az yük).
+  - `verify_tls=False` iken urllib3'ün InsecureRequestWarning'i susturuluyor.
+  - `test_all_if_no_hint` varsayılanı False oldu — ipucu bulunamayan parametrelerde
+    artık TÜM sınıflar değil sadece xss/sqli/open_redirect denenir (bütçe daha akıllı
+    harcanır); istenirse config'ten True yapılabilir.
+  - İpucu OLAN hedefler artık önce test ediliyor (bütçe tükenmeden önce en olası
+    hedeflere öncelik verilir).
+  - SQLi baseline karşılaştırması için `baseline_body` ctx'e ekleniyor.
 """
 
 import time
@@ -36,7 +48,8 @@ class ParamFuzzer:
     def __init__(self, scope_checker: Optional[Callable[[str], bool]] = None,
                  delay: float = 0.0, max_requests: int = 500, timeout: int = 10,
                  classes: Optional[List[str]] = None, headers: Optional[Dict[str, str]] = None,
-                 verify_tls: bool = False, test_all_if_no_hint: bool = True):
+                 verify_tls: bool = False, test_all_if_no_hint: bool = False,
+                 block_threshold: int = 8):
         self.scope_checker = scope_checker
         self.delay = float(delay)
         self.max_requests = int(max_requests)
@@ -45,9 +58,26 @@ class ParamFuzzer:
         self.headers = {"User-Agent": _DEFAULT_UA, **(headers or {})}
         self.verify_tls = verify_tls
         self.test_all_if_no_hint = test_all_if_no_hint
+        # DÜZELTME (bu turda eklendi): hedef art arda 403/429 dönmeye başlarsa
+        # (WAF/rate-limit tetiklendi demektir) taramayı erken durdurur — hem
+        # bütçeyi boşa harcamaz hem hedefe karşı daha kibar davranır.
+        self.block_threshold = int(block_threshold)
+        self._consecutive_blocked = 0
+        self.backoff_triggered = False
         self._sent = 0
+        self._session = None
         try:
-            import requests  # noqa: F401
+            import requests
+            self._session = requests.Session()
+            if not self.verify_tls:
+                # verify=False her istekte InsecureRequestWarning basardı — binlerce
+                # istekte konsolu boğar. TLS doğrulaması bilinçli olarak kapalı zaten,
+                # uyarıyı burada bir kez susturmak yeterli.
+                try:
+                    import urllib3
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                except ImportError:
+                    pass
             self.available = True
         except ImportError:
             self.available = False
@@ -62,7 +92,8 @@ class ParamFuzzer:
             timeout=int(fc.get("timeout", 10)),
             classes=fc.get("classes") or None,
             verify_tls=bool(fc.get("verify_tls", False)),
-            test_all_if_no_hint=bool(fc.get("test_all_if_no_hint", True)),
+            test_all_if_no_hint=bool(fc.get("test_all_if_no_hint", False)),
+            block_threshold=int(fc.get("block_threshold", 8)),
         )
 
     def _in_scope(self, url: str) -> bool:
@@ -80,13 +111,24 @@ class ParamFuzzer:
                      on_progress: Optional[Callable[[int, int, int, int], None]] = None
                      ) -> List[Dict[str, Any]]:
         """triage.param_targets listesini test eder. POTANSİYEL bulgu listesi döner.
-        `on_progress(index, total, sent, nfindings)` her endpoint sonrası çağrılır (canlı sayaç)."""
+        `on_progress(index, total, sent, nfindings)` her endpoint sonrası çağrılır (canlı sayaç).
+
+        İpucu bulunan hedefler ÖNCE test edilir (bütçe sınırlıyken en olası hedeflere
+        öncelik verir); orijinal keşif sırası ikincil anahtar olarak korunur."""
         findings: List[Dict[str, Any]] = []
         if not self.available:
             return findings
-        total = len(param_targets)
-        for i, target in enumerate(param_targets, 1):
+        ordered = sorted(enumerate(param_targets),
+                         key=lambda item: (0 if self._has_hint(item[1]) else 1, item[0]))
+        total = len(ordered)
+        for i, (_orig_idx, target) in enumerate(ordered, 1):
             if self._sent >= self.max_requests:
+                break
+            if self._consecutive_blocked >= self.block_threshold:
+                # Hedef art arda 403/429 dönüyor — muhtemelen WAF/rate-limit'e
+                # çarptık. Devam etmek bütçeyi boşa harcar ve hedefe karşı kaba
+                # olur; taramayı burada durduruyoruz.
+                self.backoff_triggered = True
                 break
             url = target.get("url", "")
             if not url or not self._in_scope(url):
@@ -110,6 +152,10 @@ class ParamFuzzer:
                 on_progress(i, total, self._sent, len(findings))
         return findings
 
+    @staticmethod
+    def _has_hint(target: Dict[str, Any]) -> bool:
+        return any(hinted for hinted in (target.get("params") or {}).values())
+
     def _classes_for(self, hinted: List[str]) -> List[str]:
         wanted = set(hinted or []) | set(_ALWAYS)
         if not hinted and self.test_all_if_no_hint:
@@ -124,9 +170,11 @@ class ParamFuzzer:
             spec = P.CLASSES.get(cls)
             if not spec:
                 continue
-            hit = False
             for meta in spec["payloads"]:
                 if self._sent >= self.max_requests:
+                    return out
+                if self._consecutive_blocked >= self.block_threshold:
+                    self.backoff_triggered = True
                     return out
                 marker = P.make_marker()
                 payload = P.render_payload(meta["p"], marker)
@@ -135,6 +183,7 @@ class ParamFuzzer:
                 if resp is None:
                     continue
                 resp["baseline_elapsed"] = baseline["elapsed"]
+                resp["baseline_body"] = baseline.get("body", "")
                 evidence = spec["detect"](resp, meta)
                 if not evidence:
                     continue
@@ -144,10 +193,7 @@ class ParamFuzzer:
                     if confirm is None or confirm["elapsed"] < baseline["elapsed"] + P.SLEEP_THRESHOLD:
                         continue
                 out.append(self._finding(cls, url, param, payload, evidence, meta))
-                hit = True
                 break   # sınıf başına ilk kanıt yeter — istek şişmesini önle
-            if hit:
-                continue
         return out
 
     def _finding(self, cls, url, param, payload, evidence, meta) -> Dict[str, Any]:
@@ -173,17 +219,32 @@ class ParamFuzzer:
         self._sent += 1
         t0 = time.time()
         try:
-            resp = requests.get(url, headers=self.headers, timeout=self.timeout,
-                                allow_redirects=False, verify=self.verify_tls)
+            resp = self._session.get(url, headers=self.headers, timeout=self.timeout,
+                                     allow_redirects=False, verify=self.verify_tls)
+        except requests.exceptions.Timeout:
+            # Timeout, zaman-tabanlı payload'lar için GÜÇLÜ bir sinyal olabilir (istek
+            # gecikmeden değil, tamamen zaman aşımına uğramaktan geliyor olabilir).
+            # Eskiden burada sessizce None dönülüp sinyal tamamen kayboluyordu.
+            return {"body": "", "headers": {}, "status": 0, "elapsed": float(self.timeout),
+                    "baseline_elapsed": 0.0, "baseline_body": "", "marker": marker,
+                    "timed_out": True}
         except Exception:
             return None
         elapsed = time.time() - t0
+        # 403/429 art arda geldiğinde WAF/rate-limit'e çarpmış olabiliriz —
+        # sayacı burada güncelle, çağıran taraf (fuzz_targets/_test_param)
+        # eşiği aşınca taramayı erken durdurur.
+        if resp.status_code in (403, 429):
+            self._consecutive_blocked += 1
+        else:
+            self._consecutive_blocked = 0
         return {
             "body": resp.text or "",
             "headers": {k.lower(): v for k, v in resp.headers.items()},
             "status": resp.status_code,
             "elapsed": elapsed,
             "baseline_elapsed": 0.0,
+            "baseline_body": "",
             "marker": marker,
         }
 

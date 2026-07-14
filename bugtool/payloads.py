@@ -16,12 +16,16 @@ Her sınıf: `hints` (param adı ipuçları), `payloads` (encode/WAF-bypass vary
 atlatma için (kullanıcı isteği: "encodelu falan").
 
 `{M}` = fuzzer'ın runtime'da ürettiği benzersiz marker ile değiştirilir.
+
+ctx sözlüğü (fuzzer.py'den gelir): body, headers (lower key), status, elapsed,
+baseline_elapsed, baseline_body, marker — `baseline_body`/`baseline_elapsed` payload'sız
+ilk isteğin sonucu, detector'lar yanlış-pozitifi azaltmak için bunlarla kıyaslayabilir.
 """
 
 import random
 import re
 import string
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def make_marker() -> str:
@@ -54,7 +58,7 @@ _LFI_PHPFILTER_RE = re.compile(r"PD9waHA|PD9wbnA")   # base64("<?php" / "<?pn")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DETEKTÖRLER  — detect(ctx, meta) -> kanıt(str) | None
-#   ctx: {body, headers(lower key), status, elapsed, baseline_elapsed, marker}
+#   ctx: {body, headers(lower key), status, elapsed, baseline_elapsed, baseline_body, marker}
 #   meta: payload sözlüğü (aşağıdaki payload listelerinden)
 # ═══════════════════════════════════════════════════════════════════════════
 def _detect_xss(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
@@ -73,10 +77,20 @@ def _detect_xss(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
 
 
 def _detect_sqli(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
+    baseline_body = ctx.get("baseline_body", "") or ""
     for rx in _SQL_ERROR_RE:
         m = rx.search(ctx["body"])
-        if m:
-            return f"SQL hata imzası: '{m.group(0)[:80]}'"
+        if not m:
+            continue
+        # DÜZELTME (önceki incelemede bulundu): baseline (payload'sız istek) ile
+        # kıyaslama yapılmıyordu. Genel bir hata/debug sayfası HER istekte (payload'dan
+        # bağımsız) görünen bir uygulamada, tek tırnak gönderen her istek "SQLi bulundu"
+        # olarak işaretlenebiliyordu. Aynı imza baseline'da da varsa bu payload'ın
+        # sebep olduğu bir şey değildir — saymıyoruz, ama zaman-tabanlı kontrolü
+        # denemeye devam ediyoruz (aşağıda).
+        if baseline_body and rx.search(baseline_body):
+            continue
+        return f"SQL hata imzası: '{m.group(0)[:80]}'"
     if meta.get("t") == "time" and ctx["elapsed"] >= ctx["baseline_elapsed"] + SLEEP_THRESHOLD:
         return f"Zaman-tabanlı gecikme: {ctx['elapsed']:.1f}s (baseline {ctx['baseline_elapsed']:.1f}s)"
     return None
@@ -122,9 +136,9 @@ def _detect_open_redirect(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional
 def _detect_crlf(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
     marker = ctx["marker"]
     # Enjekte edilen başlık response header'larına düştü mü?
-    if marker in ctx["headers"].get("bgtl-test", "") or f"bgtl-test" in ctx["headers"]:
+    if marker in ctx["headers"].get("bgtl-test", "") or "bgtl-test" in ctx["headers"]:
         return "CRLF: enjekte edilen 'Bgtl-Test' header response'a yansıdı"
-    if ("set-cookie" in ctx["headers"] and marker in ctx["headers"].get("set-cookie", "")):
+    if "set-cookie" in ctx["headers"] and marker in ctx["headers"].get("set-cookie", ""):
         return "CRLF: enjekte edilen Set-Cookie response'a yansıdı"
     return None
 
@@ -138,9 +152,11 @@ def _detect_cmdi(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
 def _detect_ssrf(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
     body = ctx["body"]
     # Yalnızca YÜKSEK sinyal: bulut metadata cevabı yansıdıysa.
-    # NOT: Eski listede "ail=1" adında, hiçbir bilinen metadata formatına karşılık
-    # gelmeyen çok kısa/genel bir imza vardı — "email=1" gibi tamamen alakasız bir
-    # string içinde bile eşleşip yanlış pozitif üretebilirdi. Kaldırıldı.
+    # DÜZELTME (önceki incelemede bulundu): eski listede "ail=1" adında, hiçbir bilinen
+    # metadata formatına karşılık gelmeyen, çok kısa/genel bir imza vardı — "email=1"
+    # gibi tamamen alakasız bir string içinde bile eşleşip yanlış pozitif üretebilirdi.
+    # Ne olması gerektiğinden emin olunamadığı için kaldırıldı (yanlış bir şeyle
+    # değiştirmek yerine).
     for sig in ("ami-id", "instance-id", "iam/security-credentials", "meta-data",
                 "computeMetadata"):
         if sig in body:

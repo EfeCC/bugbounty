@@ -5,7 +5,8 @@ teste değecek %1'i öne çıkarmak (ve fuzzer'a hedef parametre listesi üretme
 İşaretledikleri:
   - Tehlikeli parametreli URL'ler (id/redirect/file/q…) → hangi vuln sınıfına aday
   - İfşa olmuş hassas dosya/path (.git/.env/.bak/.sql/backup/swagger/actuator…)
-  - İlginç teknoloji (WordPress/Jira/Jenkins/Tomcat… + versiyon string'i)
+  - İlginç teknoloji (WordPress/Jira/Jenkins/Tomcat… + versiyon string'i — sadece
+    sunucu/altyapı tarafı; istemci kütüphaneleri hariç, aşağıya bak)
 """
 
 import json
@@ -17,11 +18,16 @@ from urllib.parse import parse_qs, urlparse
 from .payloads import hints_for_param
 
 # ── İfşa/hassas dosya & path imzaları ────────────────────────────────────────
+# GENİŞLETİLDİ (önceki incelemede önerildi): web.config/appsettings.json (IIS/.NET),
+# id_dsa/id_ecdsa/id_ed25519 + .ssh/, .npmrc/.pypirc, .git-credentials, terraform.tfstate.
 _SENSITIVE_FILE_RE = re.compile(
     r"(?:/\.git(?:/|$)|/\.svn/|/\.hg/|/\.env|/\.DS_Store|/\.htaccess|/\.htpasswd|"
-    r"wp-config\.php|config\.php|configuration\.php|settings\.py|"
+    r"wp-config\.php|config\.php|configuration\.php|settings\.py|web\.config|"
+    r"appsettings(?:\.\w+)?\.json|"
     r"\.(?:bak|old|swp|save|orig|tmp|sql|db|sqlite|zip|tar|tar\.gz|tgz|rar|7z|log|pem|key|p12|pfx)(?:$|\?)|"
-    r"/(?:backup|backups|dump|dumps|db_backup|database)\b|id_rsa|\.aws/credentials)", re.I)
+    r"/(?:backup|backups|dump|dumps|db_backup|database)\b|"
+    r"id_rsa|id_dsa|id_ecdsa|id_ed25519|\.ssh/(?:authorized_keys|known_hosts)|"
+    r"\.aws/credentials|\.npmrc|\.pypirc|\.git-credentials|terraform\.tfstate)", re.I)
 
 _INTERESTING_PATH_RE = re.compile(
     r"/(?:admin|administrator|wp-admin|api(?:/v?\d+)?|graphql|graphiql|swagger|swagger-ui|"
@@ -34,6 +40,21 @@ _TECH_FLAGS = ["wordpress", "joomla", "drupal", "jira", "confluence", "jenkins",
                "tomcat", "struts", "spring", "phpmyadmin", "adminer", "grafana", "kibana",
                "elasticsearch", "weblogic", "jboss", "coldfusion", "citrix", "fortinet"]
 _VERSION_RE = re.compile(r"\b\d+\.\d+(?:\.\d+)?\b")
+
+# DÜZELTME (önceki incelemede bulundu): "versiyon ifşası" kontrolü eskiden httpx'in
+# tech-detect ile bulduğu HER versiyonlu teknolojide tetikleniyordu (jQuery 3.6.0,
+# Bootstrap 5.1.3, Google Fonts…). Bunlar neredeyse HER sitede bulunur ve CVE avcılığı
+# için düşük değerlidir — triyajın "yüzlerce host içinden %1'i öne çıkar" amacını
+# sulandırıyordu. Bu istemci-taraflı kütüphaneleri versiyon-ifşası kontrolünden hariç
+# tutuyoruz; asıl değerli olan sunucu/altyapı yazılımının (nginx/php/tomcat/vb.) versiyonu.
+_BORING_CLIENT_TECH = {
+    "jquery", "jquery ui", "bootstrap", "popper.js", "popper", "font awesome",
+    "fontawesome", "google font api", "google fonts", "modernizr", "moment.js",
+    "lodash", "underscore.js", "react", "vue.js", "angularjs", "angular",
+    "google analytics", "google tag manager", "gtag.js", "hotjar", "segment",
+    "stripe.js", "recaptcha", "polyfill", "core-js", "requirejs", "htmx",
+    "select2", "swiper", "slick", "animate.css", "normalize.css",
+}
 
 
 class Triage:
@@ -113,14 +134,18 @@ class Triage:
             ws = h.get("webserver", "") or ""
             blob = " ".join(list(techs) + [ws]).lower()
             flagged = [t for t in _TECH_FLAGS if t in blob]
-            has_version = bool(_VERSION_RE.search(" ".join(list(techs) + [ws])))
-            if flagged or (has_version and techs):
+            # Sadece istemci-kütüphanesi OLMAYAN sinyallerde versiyon ifşasına bak.
+            infra_signals = [t for t in list(techs) + [ws]
+                             if t and not any(b in t.lower() for b in _BORING_CLIENT_TECH)]
+            has_infra_version = bool(_VERSION_RE.search(" ".join(infra_signals)))
+            if flagged or (has_infra_version and infra_signals):
+                note = ("Bilinen/ilginç yazılım: " + ", ".join(flagged)) if flagged \
+                       else "Versiyon ifşası (sunucu/altyapı — bilinen CVE için kontrol et)"
                 out.append({
                     "url": h.get("url", ""),
                     "tech": list(techs),
                     "webserver": ws,
-                    "note": ("Bilinen/ilginç yazılım: " + ", ".join(flagged)) if flagged
-                            else "Versiyon ifşası (bilinen CVE için kontrol et)",
+                    "note": note,
                 })
         return out
 

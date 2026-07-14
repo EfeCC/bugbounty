@@ -49,8 +49,13 @@ def _fake_get(url, headers=None, timeout=None, allow_redirects=False, verify=Fal
 
 @pytest.fixture
 def patch_requests(monkeypatch):
+    # Fuzzer artık requests.Session() kullanıyor → Session.get'i mock'la
     import requests
-    monkeypatch.setattr(requests, "get", _fake_get)
+
+    def _session_get(self, url, **kw):
+        return _fake_get(url, **kw)
+
+    monkeypatch.setattr(requests.sessions.Session, "get", _session_get)
 
 
 def _classes_of(findings):
@@ -125,3 +130,28 @@ def test_build_url_preserves_encoding():
     u = ParamFuzzer._build_url("http://a.example.com/p?x=1", "x", "%2e%2e%2fetc")
     assert "%2e%2e%2fetc" in u
     assert "%252e" not in u
+
+
+def test_backoff_on_consecutive_blocks(monkeypatch):
+    # Hedef art arda 429 (rate-limit) dönüyor → backoff tetiklenip erken durmalı
+    import requests
+    monkeypatch.setattr(requests.sessions.Session, "get",
+                        lambda self, url, **kw: FakeResp(status_code=429))
+    fz = ParamFuzzer(block_threshold=3)
+    targets = [{"url": f"http://a.example.com/p{i}?id=1", "params": {"id": ["sqli"]}}
+               for i in range(6)]
+    fz.fuzz_targets(targets)
+    assert fz.backoff_triggered
+    assert fz._sent < 6 * 5          # 6 endpoint'in tümü test edilmeden durdu
+
+
+def test_sqli_baseline_fp_suppressed(monkeypatch):
+    # Genel hata sayfası HER istekte (baseline dahil) SQL hatası gösteriyor → FP,
+    # payload'ın sebep olduğu bir şey değil → sqli bulgusu ÜRETİLMEMELİ
+    import requests
+    monkeypatch.setattr(requests.sessions.Session, "get",
+                        lambda self, url, **kw: FakeResp(
+                            text="You have an error in your SQL syntax; check the MySQL server"))
+    fz = ParamFuzzer()
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    assert "sqli" not in _classes_of(fz.fuzz_targets(targets))

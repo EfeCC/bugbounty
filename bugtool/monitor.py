@@ -1,9 +1,10 @@
 """AssetMonitor — bug bounty yeni-asset takibi (deterministik diff, LLM'siz).
 
 Bir scope için webrecon çıktısını baseline'a alır ve önceki baseline'la karşılaştırıp
-**yeni** subdomain / canlı host / endpoint / nuclei bulgusu listesi üretir. Bug bounty'de
-asıl edge budur: yeni çıkan asset'te ilk olmak. Saf-Python, ek bağımlılık yok — cron/systemd
-ile periyodik çalıştırılabilir.
+**yeni** subdomain / canlı host / endpoint / nuclei bulgusu listesi üretir (ve artık
+görünmeyen canlı host / bulguyu da — aşağıya bak). Bug bounty'de asıl edge budur: yeni
+çıkan asset'te ilk olmak. Saf-Python, ek bağımlılık yok — cron/systemd ile periyodik
+çalıştırılabilir.
 
 Baseline düzeni: `<baseline_dir>/<safe_scope>/<timestamp>.json` (arşiv) + `latest.json`.
 """
@@ -16,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 
 class AssetMonitor:
-    """Bir scope için asset baseline'larını yönetir ve yeni-asset diff'i üretir."""
+    """Bir scope için asset baseline'larını yönetir ve asset diff'i üretir."""
 
     def __init__(self, scope: str, baseline_dir: str = "recon"):
         self.scope = scope
@@ -63,39 +64,64 @@ class AssetMonitor:
 
     @staticmethod
     def diff(old: Optional[Dict[str, Any]], new: Dict[str, Any]) -> Dict[str, List[str]]:
-        """new − old: her kategoride yalnızca YENİ (önceden olmayan) öğeler."""
+        """new − old: her kategoride YENİ öğeler. Ayrıca old − new: artık görünmeyen
+        (kaybolan) canlı host / bulgu.
+
+        EKLENDİ (önceki incelemede bulundu): eskiden sadece "yeni" yönü izleniyordu.
+        Bir host artık canlı değilse ya da bir bulgu artık tetiklenmiyorsa (yama
+        yapıldı, WAF eklendi, scope daraldı…) bu tamamen sessiz kalıyordu — oysa bug
+        bounty'de bu da değerli bir sinyal. subdomain/endpoint için "kaybolma" izlemiyoruz
+        çünkü bunlar sadece o taramada crawl edilmediği için de düşebilir (gürültülü
+        olurdu); live_hosts/findings httpx/nuclei ile doğrulanmış, daha güvenilir sinyal."""
         old = old or {}
 
         def _new(key: str) -> List[str]:
             return sorted(set(new.get(key, []) or []) - set(old.get(key, []) or []))
+
+        def _gone(key: str) -> List[str]:
+            return sorted(set(old.get(key, []) or []) - set(new.get(key, []) or []))
 
         return {
             "new_subdomains": _new("subdomains"),
             "new_live_hosts": _new("live_hosts"),
             "new_endpoints": _new("endpoints"),
             "new_findings": _new("findings"),
+            "gone_live_hosts": _gone("live_hosts"),
+            "gone_findings": _gone("findings"),
         }
 
     @staticmethod
     def has_changes(delta: Dict[str, List[str]]) -> bool:
         return any(delta.get(k) for k in
-                   ("new_subdomains", "new_live_hosts", "new_endpoints", "new_findings"))
+                   ("new_subdomains", "new_live_hosts", "new_endpoints", "new_findings",
+                    "gone_live_hosts", "gone_findings"))
 
     def notify_webhook(self, delta: Dict[str, List[str]], webhook_url: str,
                        fmt: str = "generic") -> Dict[str, Any]:
         """Yeni asset'leri bir webhook'a bildirir (Slack/Teams/generic JSON). Bağımsız —
         harici entegrasyon çerçevesine bağlı değil. requests yoksa/istek başarısızsa
-        graceful no-op döner."""
+        graceful no-op döner.
+
+        DÜZELTME (önceki incelemede bulundu): eskiden `lines` hiç sınırlanmıyordu —
+        büyük bir delta'da (örn. yüzlerce yeni endpoint) Slack/Teams'in mesaj boyutu
+        sınırını aşıp istek reddedilebiliyordu; konsoldaki 50-item cap'i burada yoktu.
+        Şimdi aynı cap uygulanıyor, taşan kısım özetleniyor."""
         if not self.has_changes(delta) or not webhook_url:
             return {}
+        cap = 50
         lines = []
         for key, label in (("new_live_hosts", "Yeni canlı host"),
                            ("new_subdomains", "Yeni subdomain"),
                            ("new_endpoints", "Yeni endpoint"),
-                           ("new_findings", "Yeni nuclei bulgusu")):
-            for item in delta.get(key, []):
+                           ("new_findings", "Yeni nuclei bulgusu"),
+                           ("gone_live_hosts", "Artık canlı olmayan host"),
+                           ("gone_findings", "Artık görünmeyen bulgu")):
+            items = delta.get(key, [])
+            for item in items[:cap]:
                 lines.append(f"{label}: {item}")
-        text = f"[bugtool monitor] {self.scope} — {len(lines)} yeni asset/bulgu\n" + "\n".join(lines)
+            if len(items) > cap:
+                lines.append(f"… {label.lower()} kategorisinde {len(items) - cap} tane daha")
+        text = f"[bugtool monitor] {self.scope} — {len(lines)} satır bildirim\n" + "\n".join(lines)
         try:
             import requests
         except ImportError:
@@ -103,6 +129,10 @@ class AssetMonitor:
         if fmt == "slack":
             payload = {"text": text}
         elif fmt == "teams":
+            # NOT: Teams'in eski "Office 365 Connector" webhook'ları Mayıs 2026'da
+            # kapatıldı. Bu URL'in yeni bir "Workflows" webhook'u olması gerekiyor
+            # (Teams kanalı → Workflows → "Post to a channel when a webhook request
+            # is received"); eski connector URL'i artık hiçbir şey göndermez.
             payload = {"text": text}
         else:
             payload = {"scope": self.scope, "delta": delta, "text": text}
