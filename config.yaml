@@ -2,6 +2,20 @@
 # bugtool — Konfigürasyon
 # ═══════════════════════════════════════════════════════════
 
+# ── Binary Yolları (opsiyonel) ──────────────────────────────
+# Kali'de Python httpx CLI, ProjectDiscovery (PD) httpx ile çakışabilir.
+# Çakışma varsa Go binary'sinin TAM YOLUNU buraya yaz; boş = PATH'ten ara.
+# `which -a httpx` ile hangi httpx'lerin kurulu olduğunu görebilirsin.
+binaries:
+  httpx: ""          # örn: /root/go/bin/httpx veya /usr/local/bin/httpx
+  # subfinder: ""
+  # dnsx: ""
+  # nuclei: ""
+  # katana: ""
+  # gau: ""
+  # ffuf: ""
+
+
 # ── Kapsam (Scope) ─────────────────────────────────────────
 # Domain wildcard desteklenir: `*.example.com` → apex + tüm subdomain eşleşir.
 scope:

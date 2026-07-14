@@ -21,16 +21,35 @@ from bugtool.triage import Triage
 from bugtool.fuzzer import ParamFuzzer
 from bugtool.reporter import ConsoleReporter
 from bugtool.oob import OobManager, read_hit_tokens
+from bugtool.shell import set_binary_paths, detect_httpx_conflict
 
 console = Console()
+
+_CONFLICT_WARNED = False
 
 
 def load_config() -> dict:
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+            cfg = yaml.safe_load(f) or {}
+    else:
+        cfg = {}
+
+    # Binary yol override'larını shell.py registry'sine yükle (Kali httpx çakışması vb.)
+    binaries = cfg.get("binaries", {}) or {}
+    set_binary_paths(binaries)
+
+    # İlk çağrıda httpx çakışma kontrolü
+    global _CONFLICT_WARNED
+    if not _CONFLICT_WARNED:
+        _CONFLICT_WARNED = True
+        warning = detect_httpx_conflict()
+        if warning:
+            console.print(Panel(f"[bold yellow]{warning}[/bold yellow]",
+                                border_style="yellow", title="Binary Çakışması"))
+
+    return cfg
 
 
 def _scope_checker(config: dict) -> ScopeChecker:
