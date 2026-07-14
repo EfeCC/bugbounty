@@ -106,10 +106,90 @@ def _print_monitor_delta(scope: str, delta: dict, first_run: bool = False):
             console.print(f"  [dim]… ve {len(items) - 50} tane daha[/dim]")
 
 
-@click.group()
-def cli():
-    """🐛 bugtool — Bug Bounty Recon & Monitor (deterministik, LLM'siz)."""
-    pass
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """🐛 bugtool — Bug Bounty Recon & Monitor (deterministik, LLM'siz).
+
+    Parametresiz çalıştırılırsa (python main.py) interaktif menü açılır.
+    """
+    if ctx.invoked_subcommand is None:
+        _interactive_menu(ctx)
+
+
+_MENU = [
+    ("Hunt", "recon → triyaj tek komut (en sık kullanılan)"),
+    ("Recon", "sadece keşif (subdomain → httpx → ffuf → nuclei)"),
+    ("Monitor", "yeni/kaybolan asset takibi (baseline diff)"),
+    ("Triage", "mevcut recon çıktısını analiz et (+ opsiyonel aktif test)"),
+    ("OOB korelasyon", "collaborator callback'lerini gömülü problarla eşleştir"),
+]
+
+
+def _interactive_menu(ctx):
+    """Parametresiz başlatınca çıkan numaralı mod menüsü. Her mod için gereken girdileri
+    tek tek sorar, sonra ilgili komutu çağırır. 0 = çıkış."""
+    console.print(Panel("[bold cyan]🐛 bugtool[/bold cyan] — Bug Bounty Recon & Analiz\n"
+                        "[dim]deterministik · LLM'siz · asistan[/dim]", border_style="cyan"))
+    while True:
+        console.print("\n[bold]Mod seç:[/bold]")
+        for i, (name, desc) in enumerate(_MENU, 1):
+            console.print(f"  [bold cyan]{i}[/bold cyan]) {name}  [dim]— {desc}[/dim]")
+        console.print("  [bold cyan]0[/bold cyan]) Çıkış")
+        try:
+            choice = click.prompt("\nSeçiminiz", type=click.IntRange(0, len(_MENU)), default=1)
+        except click.Abort:
+            console.print("\n[dim]Çıkılıyor.[/dim]")
+            return
+        if choice == 0:
+            console.print("[dim]Görüşürüz.[/dim]")
+            return
+        try:
+            if choice == 1:
+                target = click.prompt("Hedef (domain / URL)")
+                passive = click.confirm("Sadece pasif kaynaklar mı? (aktif crawl/ffuf kapalı)",
+                                        default=False)
+                active = click.confirm("Aktif payload testi yapılsın mı? (scope-içi, opt-in)",
+                                       default=False)
+                oob = ""
+                if active:
+                    oob = click.prompt("OOB collaborator domain (kör açıklar; boş=atla)",
+                                       default="", show_default=False).strip()
+                ctx.invoke(hunt, target=target, passive=passive, active=active, oob_domain=oob)
+            elif choice == 2:
+                target = click.prompt("Hedef (domain / URL)")
+                passive = click.confirm("Sadece pasif kaynaklar mı?", default=False)
+                ctx.invoke(recon, target=target, output_dir="", passive=passive)
+            elif choice == 3:
+                scope = click.prompt("Scope (domain)")
+                passive = click.confirm("Sadece pasif kaynaklar mı?", default=False)
+                notify = click.confirm("Yeni asset'te webhook bildirimi gönderilsin mi?",
+                                       default=False)
+                ctx.invoke(monitor, scope=scope, passive=passive, diff_only=False, notify=notify)
+            elif choice == 4:
+                sd = click.prompt("Recon oturum dizini (boş = en son)",
+                                  default="", show_default=False).strip()
+                active = click.confirm("Aktif payload testi yapılsın mı?", default=False)
+                oob = ""
+                if active:
+                    oob = click.prompt("OOB collaborator domain (boş=atla)",
+                                       default="", show_default=False).strip()
+                ctx.invoke(triage, session_dir=sd, active=active, oob_domain=oob)
+            elif choice == 5:
+                sd = click.prompt("Prob'un gömüldüğü oturum dizini (boş = en son)",
+                                  default="", show_default=False).strip()
+                hits = click.prompt("Callback token dosyası (hits)")
+                ctx.invoke(oob_correlate, session_dir=sd, hits_file=hits)
+        except click.Abort:
+            console.print("\n[yellow]İptal edildi, menüye dönülüyor.[/yellow]")
+        except click.ClickException as e:
+            console.print(f"[bold red]Hata: {e.format_message()}[/bold red]")
+        except Exception as e:  # menüyü canlı tut — bir mod patlarsa menü kapanmasın
+            console.print(f"[bold red]Beklenmedik hata: {e}[/bold red]")
+
+        if not click.confirm("\nMenüye dön?", default=True):
+            console.print("[dim]Görüşürüz.[/dim]")
+            return
 
 
 @cli.command()

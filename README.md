@@ -12,6 +12,7 @@ cp scope.txt.example scope.txt           # program scope'unu yaz
 
 ## Kullanım
 ```bash
+python main.py                                   # İNTERAKTİF MENÜ (parametresiz) — rakamla mod seç
 python main.py hunt example.com                  # TEK KOMUT: recon → triyaj (otomatik zincir)
 python main.py hunt example.com --active          #   + aktif detection payload testi (opt-in)
 python main.py recon example.com                 # subdomain → httpx → ffuf → URL → nuclei
