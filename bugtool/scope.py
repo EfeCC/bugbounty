@@ -78,6 +78,12 @@ class ScopeChecker:
         self.allowed = list(allowed or []) + file_allowed
         self.excluded = list(excluded or []) + file_excluded
 
+    def has_real_scope(self) -> bool:
+        """Gerçekten bir kısıtlama tanımlı mı? (config'te bir dosya adı YAZILI olması
+        yetmez — dosya gerçekten yüklenip içine bir şey girmiş olmalı.) Aktif test
+        öncesi sert kapı için: main.py → _run_active_test."""
+        return bool(self.allowed or self.excluded)
+
     def is_in_scope(self, target: str) -> bool:
         if not self.excluded and not self.allowed:
             return True  # scope tanımlı değilse her şey geçerli

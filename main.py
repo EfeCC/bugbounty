@@ -214,12 +214,22 @@ def _render_triage(result: dict):
 
 
 def _run_active_test(result: dict, config: dict, session_dir: str):
-    """Aktif detection-payload testini çalıştırır (opt-in). POTANSİYEL bulguları kaydeder."""
+    """Aktif detection-payload testini çalıştırır (opt-in). POTANSİYEL bulguları kaydeder.
+
+    GÜVENLİK: gerçek bir kapsam (scope.txt dolu VEYA allowed_targets) yoksa SERT DURUR —
+    hiç istek atmaz. Eskiden yalnızca sarı uyarı basıp devam ediyordu; taze kurulumda
+    scope.txt henüz yokken aktif test fiilen kapsamsız çalışabiliyordu."""
     checker = _scope_checker(config)
-    scope_cfg = config.get("scope", {}) or {}
-    if not scope_cfg.get("allowed_targets") and not scope_cfg.get("scope_file"):
-        console.print("[yellow]  ⚠ scope tanımlı değil (scope.txt yok) — yalnızca kendi recon "
-                      "hedefine ait host'ları test ettiğinden emin ol.[/yellow]")
+    if not checker.has_real_scope():
+        console.print(Panel(
+            "[bold red]❌ AKTİF TEST DURDURULDU[/bold red]\n"
+            "Gerçek bir kapsam tanımı yok: scope.txt yok/boş ve config.yaml → "
+            "scope.allowed_targets de boş.\n"
+            "[dim]Önce program kapsamını scope.txt'ye ekle (satır formatı: `example.com` / "
+            "`*.example.com` izinli, `!admin.example.com` yasak) ya da config.yaml → "
+            "scope.allowed_targets'ı doldur, sonra tekrar dene.[/dim]",
+            border_style="red"))
+        return
     fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)
     if not fuzzer.available:
         console.print("[bold red]❌ 'requests' kurulu değil — aktif test yapılamıyor "

@@ -65,6 +65,18 @@ def test_scope_filter_drops_out_of_scope(monkeypatch, tmp_path):
     assert "api.example.com" in p["subdomains"]
 
 
+def test_scope_checker_exception_fails_closed(monkeypatch, tmp_path):
+    # Regresyon: scope kontrolü hata verirse fail-CLOSED olmalı (host'u kapsam-dışı say).
+    _patch(monkeypatch)
+
+    def boom(host):
+        raise RuntimeError("scope patladı")
+
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path), scope_checker=boom)
+    assert p["subdomains"] == []          # hepsi (apex dahil) güvenli tarafta düştü
+
+
 def test_passive_only_skips_katana(monkeypatch, tmp_path):
     _patch(monkeypatch)
     wr = WebRecon(passive_only=True)

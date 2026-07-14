@@ -5,6 +5,14 @@ import pytest
 from bugtool.scope import ScopeChecker, host_only, load_scope_file, target_matches
 
 
+def test_has_real_scope():
+    # Boş → gerçek kapsam yok (aktif test sert durmalı)
+    assert not ScopeChecker().has_real_scope()
+    # allowed veya excluded doluysa gerçek kapsam var
+    assert ScopeChecker(allowed=["example.com"]).has_real_scope()
+    assert ScopeChecker(excluded=["admin.example.com"]).has_real_scope()
+
+
 @pytest.mark.parametrize("target,entry,expected", [
     ("api.example.com", "*.example.com", True),
     ("deep.sub.example.com", "*.example.com", True),

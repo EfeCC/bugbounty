@@ -87,6 +87,14 @@ def test_detect_ssrf():
     assert not det(_ctx(body="normal"), {"p": "x", "t": "probe"})
 
 
+def test_detect_ssrf_no_false_positive_on_ail():
+    # Regresyon: eski listede "ail=1" imzası vardı → "email=1" gibi alakasız
+    # metinde yanlış pozitif üretiyordu. Kaldırıldı.
+    det = P.CLASSES["ssrf"]["detect"]
+    assert not det(_ctx(body="user email=1 confirmed"), {"p": "x", "t": "probe"})
+    assert det(_ctx(body="instance-id: i-0abc"), {"p": "x", "t": "probe"})
+
+
 def test_all_classes_have_payloads_and_detect():
     for cls, spec in P.CLASSES.items():
         assert spec["payloads"], cls

@@ -137,9 +137,12 @@ def _detect_cmdi(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
 
 def _detect_ssrf(ctx: Dict[str, Any], meta: Dict[str, str]) -> Optional[str]:
     body = ctx["body"]
-    # Yalnızca YÜKSEK sinyal: bulut metadata cevabı yansıdıysa
+    # Yalnızca YÜKSEK sinyal: bulut metadata cevabı yansıdıysa.
+    # NOT: Eski listede "ail=1" adında, hiçbir bilinen metadata formatına karşılık
+    # gelmeyen çok kısa/genel bir imza vardı — "email=1" gibi tamamen alakasız bir
+    # string içinde bile eşleşip yanlış pozitif üretebilirdi. Kaldırıldı.
     for sig in ("ami-id", "instance-id", "iam/security-credentials", "meta-data",
-                "computeMetadata", "ail=1"):
+                "computeMetadata"):
         if sig in body:
             return f"SSRF: iç metadata servisi cevabı yansıdı ('{sig}')"
     return None

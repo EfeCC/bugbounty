@@ -119,7 +119,9 @@ class WebRecon:
             try:
                 return bool(scope_checker(host))
             except Exception:
-                return True
+                # FAIL-CLOSED: kapsam kontrolü beklenmedik şekilde hata verirse hedefi
+                # "kapsamda" değil "kapsam-dışı" say — güvenlik kontrolü şüphede izin vermez.
+                return False
 
         # ── 1. Subdomain enumerasyonu (subfinder) ──────────────────
         subdomains: List[str] = []
