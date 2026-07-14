@@ -74,4 +74,31 @@ else
     err "pip3 yok"
 fi
 
+# ── httpx çakışma çözücü (Kali: Python httpx ↔ ProjectDiscovery httpx) ──────
+section "httpx Çakışma Kontrolü"
+HTTPX_PATH="$(command -v httpx || true)"
+if [ -z "$HTTPX_PATH" ]; then
+    warn "httpx PATH'te yok. Kali: sudo apt install httpx-toolkit"
+    warn "  sonra config.yaml → binaries.httpx: /usr/bin/httpx-toolkit"
+elif httpx -version 2>&1 | grep -qiE "projectdiscovery|current"; then
+    ok "httpx doğru sürüm (ProjectDiscovery): $HTTPX_PATH"
+else
+    warn "PATH'teki httpx ($HTTPX_PATH) ProjectDiscovery DEĞİL (muhtemelen Python httpx CLI)."
+    if [ -x "$GOBIN_DIR/httpx" ]; then
+        FIX="$GOBIN_DIR/httpx"
+    elif have httpx-toolkit; then
+        FIX="$(command -v httpx-toolkit)"
+    else
+        FIX=""
+    fi
+    if [ -n "$FIX" ]; then
+        echo -e "  ${C_CYAN}→ ÇÖZÜM: config.yaml → binaries bölümüne şunu yaz:${C_RESET}"
+        echo -e "        binaries:"
+        echo -e "          httpx: ${FIX}"
+    else
+        echo -e "  ${C_CYAN}→ ÇÖZÜM: sudo apt install httpx-toolkit  (sonra binaries.httpx: /usr/bin/httpx-toolkit)${C_RESET}"
+    fi
+fi
+
 echo -e "\n${C_CYAN}Kurulum tamam. Doğrulamak için: ./scripts/install_dependencies.sh --verify-only${C_RESET}"
+echo -e "${C_CYAN}Kali kestirmesi (apt):  sudo apt install -y subfinder dnsx nuclei ffuf katana httpx-toolkit${C_RESET}"
