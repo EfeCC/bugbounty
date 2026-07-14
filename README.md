@@ -10,7 +10,59 @@ pip install -r requirements.txt
 cp scope.txt.example scope.txt           # program scope'unu yaz
 ```
 
-## Kullanım
+## Kullanım Kılavuzu (adım adım)
+
+### 0. İlk kez: kapsamı ayarla (ZORUNLU)
+`scope.txt` dosyasına yalnızca **test etme yetkin olan** hedefleri yaz. Bu dosya boşsa
+`--active` (payload) testi **çalışmaz** (güvenlik kilidi). Satır formatı:
+```
+*.example.com        # apex + tüm subdomain'ler izinli
+api.example.com      # sadece bu host
+!admin.example.com   # ! = ASLA dokunma (yasak)
+```
+
+### 1. Menüyü aç
+Parametre ezberlemeden, sadece:
+```bash
+python main.py
+```
+Numaralı menü çıkar. **İstediğin rakamı yazıp Enter'a bas** (örn. `5` → OOB korelasyon).
+`[1]` yanındaki köşeli parantez "boş Enter = 1" demek; seni 1'e mecbur etmez.
+
+| # | Mod | Ne yapar | Sana ne sorar |
+|---|-----|----------|----------------|
+| 1 | **Hunt** | recon → triyaj tek akış (en sık bu) | hedef · pasif mi? · aktif test? · OOB domain? |
+| 2 | **Recon** | sadece keşif (subdomain→httpx→ffuf→nuclei) | hedef · pasif mi? |
+| 3 | **Monitor** | yeni/kaybolan asset diff'i (cron'la günlük) | scope · pasif mi? · webhook? |
+| 4 | **Triage** | mevcut çıktıyı analiz + opsiyonel aktif test | oturum dizini · aktif test? · OOB domain? |
+| 5 | **OOB korelasyon** | collaborator callback'lerini eşleştir | oturum dizini · hits dosyası |
+| 0 | Çıkış | — | — |
+
+Bir mod bitince **"Menüye dön?"** diye sorar; art arda iş yapabilirsin.
+
+### 2. Tipik bir av (workflow)
+1. Menü → **1 (Hunt)** → hedefi gir, "aktif test?" = hayır → önce sadece keşif+triyaj gör.
+2. Ekranda **ilginç URL / parametreli endpoint / tech / takeover / secret** işaretlerini incele.
+3. İşe yarar görünüyorsa → menü → **4 (Triage)** → "aktif test?" = **evet** → payload testi çalışır.
+4. Bulgular `reports/<hedef>_<tarih>/triage_findings.json`'a yazılır (hepsi **POTANSİYEL**).
+5. Her bulgunun `reproduction` alanını **elle** (Burp/tarayıcı) doğrula → gerçekse rapor et.
+
+### 3. Çıktılar nerede
+Her tarama `reports/<hedef>_<tarih_saat>/` altına yazar:
+`subdomains.txt` · `httpx.jsonl` · `urls.txt` · `nuclei.txt` · `triage_findings.json` · `oob_probes.json`
+
+### 4. Kör (blind) açıklar — OOB
+Cevapta yansıma olmayan SSRF/CMDi/XSS için kendi **interactsh** ya da **Burp Collaborator**
+domain'in gerekir:
+1. Menü → **1 (Hunt)** ya da **4 (Triage)** → "aktif test?" = evet → "OOB domain?" = `senin-domainin`.
+   Tool `TOKEN.senin-domainin` gömer, `oob_probes.json`'a kaydeder.
+2. Collaborator panelinde gelen callback token'larını bir dosyaya (`hits.txt`) al.
+3. Menü → **5 (OOB korelasyon)** → oturum + `hits.txt` → eşleşen her prob `confirmed_oob` bulgusu olur.
+
+---
+
+## Komut Referansı (parametreli — script/otomasyon için)
+Menüyü kullanmak istemezsen doğrudan da çağırabilirsin:
 ```bash
 python main.py                                   # İNTERAKTİF MENÜ (parametresiz) — rakamla mod seç
 python main.py hunt example.com                  # TEK KOMUT: recon → triyaj (otomatik zincir)
