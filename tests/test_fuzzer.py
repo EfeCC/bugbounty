@@ -201,3 +201,35 @@ def test_timing_ladder_inconclusive(monkeypatch):
     assert sqli[0]["verdict"] == "inconclusive"
     assert sqli[0]["status"] == "inconclusive"
     assert sqli[0]["confidence"] == "low"
+
+
+def test_waf_bypass_positive_control(monkeypatch):
+    # Kanonik payload WAF'a takılır (403), mutasyon geçer + SQL hatası ateşler → bypass bulgusu
+    import requests
+    state = {"n": 0}
+
+    def fake_get(self, url, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            return FakeResp(text="normal page")                               # baseline
+        if state["n"] == 2:
+            return FakeResp(status_code=403, text="Access Denied — Cloudflare")  # kanonik bloklandı
+        return FakeResp(text="You have an error in your SQL syntax; MySQL")    # mutasyon geçti+fired
+
+    monkeypatch.setattr(requests.sessions.Session, "get", fake_get)
+    fz = ParamFuzzer(classes=["sqli"])
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    sqli = [f for f in fz.fuzz_targets(targets) if f["class"] == "sqli"]
+    assert sqli
+    assert sqli[0].get("waf_bypass")            # bir mutasyon adıyla işaretli
+    assert "WAF atlatıldı" in sqli[0]["evidence"]
+
+
+def test_no_waf_bypass_without_block(monkeypatch):
+    # Kanonik payload BLOKLANMADI (WAF yok) → bypass denenmez (pozitif kontrol)
+    import requests
+    monkeypatch.setattr(requests.sessions.Session, "get",
+                        lambda self, url, **kw: FakeResp(text="normal page, nothing here"))
+    fz = ParamFuzzer(classes=["sqli"])
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    assert not any(f.get("waf_bypass") for f in fz.fuzz_targets(targets))

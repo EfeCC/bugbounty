@@ -57,3 +57,5 @@ fuzz:
   # doğrular → ağ gürültüsü FP'sini eler, FIRED/INCONCLUSIVE/NOT_FIRED üretir.
   ladder_doses: [0, 2, 4, 6]   # sleep dozları (sn); yanıt süresi bunlarla doğrusal artmalı
   ladder_rounds: 2             # her doz kaç tur ölçülsün (medyan alınır; artırınca daha sağlam/yavaş)
+  # WAF-bypass: kanonik payload WAF'a takılınca (pozitif kontrol) denenecek mutasyon sayısı
+  waf_mutations_cap: 6         # sqli/ssti'de encode/yorum/case varyantlarıyla atlatmayı dene

@@ -30,6 +30,12 @@ from urllib.parse import parse_qsl, quote, urlparse, urlunparse
 
 from . import payloads as P
 from . import timing
+from . import mutator
+
+# WAF-bypass yalnızca cevap-içeriği ile tespit edilen, büyük-küçük DUYARSIZ sınıflarda
+# denenir (sqli anahtar kelimeleri / ssti aritmetiği). LFI dosya yolu büyük-küçük duyarlı
+# olduğu için (case_toggle /etc/passwd'i bozar) dışarıda bırakılır.
+_BYPASS_CLASSES = ("sqli", "ssti")
 
 _DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 bugtool")
@@ -51,7 +57,7 @@ class ParamFuzzer:
                  classes: Optional[List[str]] = None, headers: Optional[Dict[str, str]] = None,
                  verify_tls: bool = False, test_all_if_no_hint: bool = False,
                  block_threshold: int = 8, ladder_doses: Optional[List[float]] = None,
-                 ladder_rounds: int = 2):
+                 ladder_rounds: int = 2, waf_mutations_cap: int = 6):
         self.scope_checker = scope_checker
         self.delay = float(delay)
         self.max_requests = int(max_requests)
@@ -63,6 +69,7 @@ class ParamFuzzer:
         # Timing-ladder (doz-yanıt) — ucuz probe şüpheli olunca doz merdiveniyle doğrula
         self.ladder_doses = ladder_doses or timing.DEFAULT_DOSES
         self.ladder_rounds = int(ladder_rounds)
+        self.waf_mutations_cap = int(waf_mutations_cap)   # WAF-bypass'ta denenecek max mutasyon
         # DÜZELTME (bu turda eklendi): hedef art arda 403/429 dönmeye başlarsa
         # (WAF/rate-limit tetiklendi demektir) taramayı erken durdurur — hem
         # bütçeyi boşa harcamaz hem hedefe karşı daha kibar davranır.
@@ -101,6 +108,7 @@ class ParamFuzzer:
             block_threshold=int(fc.get("block_threshold", 8)),
             ladder_doses=fc.get("ladder_doses") or None,
             ladder_rounds=int(fc.get("ladder_rounds", 2)),
+            waf_mutations_cap=int(fc.get("waf_mutations_cap", 6)),
         )
 
     def _in_scope(self, url: str) -> bool:
@@ -193,6 +201,14 @@ class ParamFuzzer:
                 resp["baseline_body"] = baseline.get("body", "")
                 evidence = spec["detect"](resp, meta)
                 if not evidence:
+                    # POZİTİF KONTROL: kanonik payload WAF'a takıldıysa, mutasyonlarla
+                    # atlatmayı dene (yalnızca içerik-tabanlı, case-duyarsız sınıflarda).
+                    if (cls in _BYPASS_CLASSES and meta.get("t") != "time"
+                            and mutator.is_waf_blocked(resp["status"], resp["body"])):
+                        bypass = self._try_waf_bypass(url, param, cls, spec, meta, payload, baseline)
+                        if bypass:
+                            out.append(bypass)
+                            break
                     continue
                 verdict = "fired"
                 # Zaman-tabanlı pozitifi TEK istekle değil, doz merdiveniyle (dose-response)
@@ -226,6 +242,28 @@ class ParamFuzzer:
             if times:
                 measurements[dose] = times
         return timing.evaluate_ladder(list(self.ladder_doses), measurements)
+
+    def _try_waf_bypass(self, url, param, cls, spec, meta, canonical, baseline):
+        """Kanonik payload WAF'a takıldı → mutasyonlarını dene. Bir mutasyon BLOKLANMADAN
+        geçer VE aynı detektör ateşlerse → WAF-bypass + altta yatan zafiyet bulgusu.
+        (Pozitif kontrol: kanonik bloğu çağıran zaten gördü, burada sadece 'geçen mutasyon'u arıyoruz.)"""
+        for name, mutated in mutator.mutations(canonical)[: self.waf_mutations_cap]:
+            if self._sent >= self.max_requests:
+                return None
+            resp = self._request(self._build_url(url, param, mutated))
+            if resp is None or mutator.is_waf_blocked(resp["status"], resp["body"]):
+                continue
+            resp["baseline_elapsed"] = baseline["elapsed"]
+            resp["baseline_body"] = baseline.get("body", "")
+            evidence = spec["detect"](resp, meta)
+            if evidence:
+                f = self._finding(cls, url, param, mutated,
+                                  f"WAF atlatıldı ({name}) → {evidence}", meta)
+                f["waf_bypass"] = name
+                f["note"] = ("POTANSİYEL — kanonik payload WAF'a takıldı, '" + name +
+                             "' mutasyonu geçti. Manuel doğrula.")
+                return f
+        return None
 
     def _finding(self, cls, url, param, payload, evidence, meta, verdict="fired") -> Dict[str, Any]:
         conf = "high" if meta.get("t") in ("time", "error") or cls in ("lfi", "ssti") else "medium"
