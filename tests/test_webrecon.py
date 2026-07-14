@@ -1,4 +1,11 @@
-"""webrecon pipeline parse + orkestrasyon testleri (mock shell.run — binary/ağ GEREKTİRMEZ)."""
+"""webrecon pipeline parse + orkestrasyon testleri (mock shell.run — binary/ağ GEREKTİRMEZ).
+
+NOT: Yeni ağ-modülleri (ct_logs/takeover/git_check/cors/secrets) `requests`'i DOĞRUDAN
+çağırır (mock'lanan `run` üzerinden değil). Bu çekirdek testlerde onları no-op'a çevirip
+gerçek ağ isteğini engelliyoruz; kendi ayrı testlerinde (test_newmodules.py) mock'lu."""
+
+import re
+import json as _json
 
 import bugtool.webrecon as webrecon_mod
 from bugtool.webrecon import WebRecon
@@ -8,9 +15,12 @@ HTTPX = ('{"url":"https://api.example.com","status_code":200,"title":"API","tech
          '{"url":"https://example.com","status_code":301,"title":""}\n')
 KATANA = "https://api.example.com/v1/users\nhttps://api.example.com/v1/login\n"
 GAU = "https://example.com/robots.txt\nhttps://api.example.com/v1/users\n"
-NUCLEI = ("[tech-detect] [http] [info] https://example.com\n"
-          "[exposed-git] [http] [medium] https://api.example.com/.git/\n")
-FFUF = "admin\nbackup.zip\n"
+# nuclei artık -jsonl (satır satır JSON) — info seviyesi filtrelenir, medium kalır
+NUCLEI = ('{"template-id":"tech-detect","info":{"severity":"info","name":"Tech"},'
+          '"matched-at":"https://example.com"}\n'
+          '{"template-id":"exposed-git","info":{"severity":"medium","name":"Exposed .git"},'
+          '"matched-at":"https://api.example.com/.git/",'
+          '"curl-command":"curl https://api.example.com/.git/"}\n')
 
 
 def _patch(monkeypatch, have=True):
@@ -21,7 +31,14 @@ def _patch(monkeypatch, have=True):
         c = cmd.lower()
         out = ""
         if "ffuf" in c:
-            out = FFUF
+            # ffuf artık -o <path> -of json ile JSON dosyaya yazıyor → dosyayı üret
+            mo = re.search(r"-o (\S+)", cmd)
+            mu = re.search(r"-u (\S+)/FUZZ", cmd)
+            if mo:
+                base = mu.group(1) if mu else "https://x"
+                with open(mo.group(1), "w", encoding="utf-8") as fh:
+                    _json.dump({"results": [{"url": f"{base}/admin"},
+                                            {"url": f"{base}/backup.zip"}]}, fh)
         elif "subfinder" in c:
             out = SUBS
         elif "dnsx" in c:
@@ -38,6 +55,12 @@ def _patch(monkeypatch, have=True):
 
     monkeypatch.setattr(webrecon_mod, "have", fake_have)
     monkeypatch.setattr(webrecon_mod, "run", fake_run)
+    # Ağ-modüllerini no-op'la (gerçek istek atmasınlar) — kendi testlerinde ayrıca test edilir
+    monkeypatch.setattr(webrecon_mod.ct_logs, "fetch_subdomains", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.takeover, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
 
 
 def test_pipeline_full(monkeypatch, tmp_path):

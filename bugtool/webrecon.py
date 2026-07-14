@@ -1,18 +1,44 @@
 """Web recon pipeline — bug bounty asset keşfi. Deterministik, LLM'siz.
 
-subfinder → dnsx → httpx → (katana + gau) → nuclei zincirini `bugtool.shell.run` ile
-orkestre eder. Her aşama binary yoksa SESSİZCE atlanır (graceful-degrade) — asla çökmez,
-kısmi sonuç döner.
+subfinder+crt.sh → dnsx → subdomain-takeover → httpx → (katana + gau + ffuf) → nuclei
+zincirini `bugtool.shell.run` ile orkestre eder. Her aşama binary/bağımlılık yoksa
+SESSİZCE atlanır (graceful-degrade) — asla çökmez, kısmi sonuç döner. Ama bir aşama
+VARKEN çalışıp hata verirse artık `reporter.error()` ile görünür oluyor — eskiden
+"0 sonuç" ile "araç kırıldı" ayrımı yoktu.
+
+Bu turda eklenenler (para-getirici yüzeyi genişletmek için):
+  - Certificate Transparency (crt.sh): subfinder'a ek pasif subdomain kaynağı —
+    henüz linklenmemiş, YENİ verilmiş sertifikaları yakalar (bkz. ct_logs.py).
+  - Subdomain takeover kontrolü: dangling CNAME'leri bilinen sahiplenilebilir
+    servislere (GitHub Pages/S3/Heroku/vb.) karşı kontrol eder (bkz. takeover.py).
+  - Secret/API-key tarama: keşfedilen JS dosyalarını (3.taraf/CDN hariç) bilinen
+    ~25 servis formatına karşı tarar (bkz. secrets_scan.py). Sonuçlar maskeli.
+  Üçü de pasif/düşük-riskli olduğu için --active gerektirmez, her recon'da çalışır.
+
+Önceki turda düzeltilenler:
+  - `_in_scope`: scope_checker exception fırlatırsa artık "kapsam-dışı say" (eskiden
+    "kapsamda say" dönüyordu — kapsam kontrolünün amacının tam tersiydi).
+  - nuclei artık `-jsonl` ile çalıştırılıp yapılandırılmış JSON parse ediliyor (eskiden
+    insan-okunur metni regex ile parse ediyordu; extractor kullanan template'lerde
+    reproduction URL'i yanlış çıkarabiliyordu).
+  - ffuf artık `-o/-of json` ile çalıştırılıp yapılandırılmış JSON parse ediliyor
+    (eskiden stdout satırlarının URL mi path mi olduğunu tahmin ediyordu).
+  - Her `run()` çağrısından sonra başarısızlık `reporter.error()` ile yüzeye çıkıyor.
 """
 
 import json
 import os
 import re
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from .shell import have, run
+from . import ct_logs
+from . import takeover
+from . import secrets_scan
+from . import git_check
+from . import cors_check
 
 
 class WebRecon:
@@ -22,7 +48,8 @@ class WebRecon:
                  concurrency: int = 25, nuclei_severity: str = "low,medium,high,critical",
                  timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None,
                  ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
-                 ffuf_codes: str = "200,204,301,302,307,401,403,405,500"):
+                 ffuf_codes: str = "200,204,301,302,307,401,403,405,500",
+                 secrets_max_files: int = 40):
         self.passive_only = passive_only
         self.rate_limit = rate_limit
         self.concurrency = concurrency
@@ -33,6 +60,7 @@ class WebRecon:
         self.ffuf_wordlist = ffuf_wordlist
         self.ffuf_max_hosts = ffuf_max_hosts
         self.ffuf_codes = ffuf_codes
+        self.secrets_max_files = secrets_max_files
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "WebRecon":
@@ -48,6 +76,7 @@ class WebRecon:
             ffuf_wordlist=str(wc.get("ffuf_wordlist", "") or ""),
             ffuf_max_hosts=int(wc.get("ffuf_max_hosts", 10)),
             ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
+            secrets_max_files=int(wc.get("secrets_max_files", 40)),
         )
 
     def _find_wordlist(self) -> str:
@@ -64,23 +93,32 @@ class WebRecon:
                 return cand
         return ""
 
-    def _ffuf_host(self, host: str, wordlist: str) -> List[str]:
-        """Tek host'ta ffuf içerik keşfi (dizin/dosya brute). Bulunan yolları tam URL döner.
-        `-ac` (auto-calibrate) soft-404/wildcard cevaplarını eler → yanlış-pozitif azaltır."""
+    def _ffuf_host(self, host: str, wordlist: str, output_dir: str) -> Tuple[List[str], bool]:
+        """Tek host'ta ffuf içerik keşfi (dizin/dosya brute). `-o/-of json` ile
+        yapılandırılmış sonuç alır (status code bilgisi korunur, stdout satırlarının
+        URL mi path mi olduğunu tahmin etmeye gerek kalmaz). `-ac` (auto-calibrate)
+        soft-404/wildcard cevaplarını eler → yanlış-pozitif azaltır.
+        Döner: (bulunan URL'ler, aşama başarılı mı)."""
         base = host.rstrip("/")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("_") or "host"
+        out_json = os.path.join(output_dir, f"ffuf_{safe_name}.json")
         cmd = (f"ffuf -u {base}/FUZZ -w {wordlist} -mc {self.ffuf_codes} "
-               f"-ac -s -t {self.concurrency} -rate {self.rate_limit} -timeout 10")
-        r = run(cmd, timeout=self.timeout)
+               f"-ac -s -t {self.concurrency} -rate {self.rate_limit} -timeout 10 "
+               f"-o {out_json} -of json")
+        run(cmd, timeout=self.timeout)
         hits: List[str] = []
-        for line in self._lines(r["stdout"]):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(("http://", "https://")):
-                hits.append(line)
-            else:
-                hits.append(f"{base}/{line.lstrip('/')}")
-        return hits
+        if not os.path.exists(out_json):
+            return hits, False
+        try:
+            with open(out_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for res in data.get("results", []) or []:
+                url = res.get("url", "")
+                if url:
+                    hits.append(url)
+        except (OSError, ValueError):
+            return hits, False
+        return hits, True
 
     def _stage_on(self, stage: str, default: bool = True) -> bool:
         return bool(self.stages.get(stage, default))
@@ -94,6 +132,19 @@ class WebRecon:
     @staticmethod
     def _lines(stdout: str) -> List[str]:
         return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+
+    @staticmethod
+    def _warn_if_failed(reporter: Any, r: Optional[Dict[str, Any]], label: str):
+        """Bir `shell.run()` sonucunu kontrol eder: binary çalıştı ama hata verdiyse
+        (boş stdout + başarısız dönüş) reporter üzerinden görünür kılar. Eskiden bu
+        sessizce 'aşama 0 sonuç buldu' gibi görünüyordu — hedef temiz mi, araç mı
+        kırıldı ayırt edilemiyordu."""
+        if r is None:
+            return
+        if not r.get("success") and not (r.get("stdout") or "").strip():
+            err = (r.get("stderr") or "").strip()
+            first_line = err.splitlines()[0][:200] if err else "bilinmeyen hata"
+            reporter.error(f"{label} çalışırken hata: {first_line}")
 
     def run_pipeline(self, target: str, output_dir: str = "",
                      scope_checker: Optional[Callable[[str], bool]] = None,
@@ -112,6 +163,8 @@ class WebRecon:
 
         stages_run: List[str] = []
         stages_skipped: List[str] = []
+        # Erken başlatıldı: hem subdomain-takeover hem nuclei aynı listeye ekliyor.
+        findings: List[Dict[str, Any]] = []
 
         def _in_scope(host: str) -> bool:
             if not scope_checker:
@@ -119,8 +172,9 @@ class WebRecon:
             try:
                 return bool(scope_checker(host))
             except Exception:
-                # FAIL-CLOSED: kapsam kontrolü beklenmedik şekilde hata verirse hedefi
-                # "kapsamda" değil "kapsam-dışı" say — güvenlik kontrolü şüphede izin vermez.
+                # DÜZELTME: scope_checker beklenmedik şekilde patlarsa (ör. bozuk bir
+                # host string'i) eskiden "kapsamda say" (True) dönüyordu — kapsam
+                # kontrolünün amacının tam tersi. Şimdi hata durumunda kapsam-dışı say.
                 return False
 
         # ── 1. Subdomain enumerasyonu (subfinder) ──────────────────
@@ -129,10 +183,30 @@ class WebRecon:
             with reporter.stage("Subdomain aranıyor (subfinder)"):
                 r = run(f"subfinder -d {domain} -silent", timeout=self.timeout)
                 subdomains = self._lines(r["stdout"])
+            self._warn_if_failed(reporter, r, "subfinder")
             stages_run.append("subfinder")
         else:
             stages_skipped.append("subfinder")
             reporter.skip("Subdomain: subfinder kurulu değil — atlandı (yalnızca apex)")
+
+        # crt.sh (Certificate Transparency) — ek pasif kaynak, subfinder'ın kaçırdığı
+        # YENİ/linklenmemiş sertifikaları yakalayabilir. passive_only'den etkilenmez
+        # (hedefin kendisine değil, üçüncü taraf bir kayda sorgu atar).
+        if self._stage_on("ctlogs"):
+            with reporter.stage("Sertifika şeffaflığı logları taranıyor (crt.sh)"):
+                ct_subs = ct_logs.fetch_subdomains(domain, timeout=min(self.timeout, 30))
+                ct_subs = [s for s in ct_subs if s == domain or s.endswith("." + domain)]
+            if ct_subs:
+                new_count = len(set(ct_subs) - set(subdomains))
+                subdomains.extend(ct_subs)
+                stages_run.append("ctlogs")
+                reporter.done(f"{len(ct_subs)} subdomain (crt.sh) — {new_count} tanesi yeni")
+            else:
+                stages_skipped.append("ctlogs")
+                reporter.skip("crt.sh: sonuç yok/erişilemedi (requests kurulu değil olabilir) — atlandı")
+        else:
+            stages_skipped.append("ctlogs")
+
         if domain not in subdomains:
             subdomains.insert(0, domain)
         seen = set()
@@ -149,6 +223,7 @@ class WebRecon:
             with reporter.stage("Canlı subdomain'ler çözümleniyor (dnsx)"):
                 r = run(f"dnsx -l {subs_file} -silent", timeout=self.timeout)
                 got = [h for h in self._lines(r["stdout"]) if _in_scope(h)]
+            self._warn_if_failed(reporter, r, "dnsx")
             if got:
                 resolved = got
             stages_run.append("dnsx")
@@ -159,6 +234,26 @@ class WebRecon:
         resolved_file = os.path.join(output_dir, "resolved.txt")
         self._write_lines(resolved_file, resolved)
 
+        # ── 2b. Subdomain takeover kontrolü ──────────────────────────
+        # Kasıtlı olarak TÜM `subdomains` listesine bakar, sadece `resolved`e değil:
+        # klasik dangling-CNAME durumunda CNAME kaydı vardır ama A-record zinciri
+        # çözülmeyebilir (bkz. takeover.py docstring'i). Pasif/düşük-riskli olduğu
+        # için --active gerektirmez; yine de scope_checker'dan geçer.
+        if self._stage_on("takeover") and have("dnsx"):
+            with reporter.stage("Subdomain takeover kontrolü (dangling CNAME)"):
+                takeover_findings = takeover.check(subdomains, timeout=self.timeout,
+                                                   scope_checker=_in_scope)
+                findings.extend(takeover_findings)
+            stages_run.append("takeover")
+            if takeover_findings:
+                reporter.done(f"{len(takeover_findings)} takeover adayı ⚠️")
+            else:
+                reporter.done("takeover adayı yok")
+        else:
+            stages_skipped.append("takeover")
+            if not have("dnsx"):
+                reporter.skip("Subdomain takeover kontrolü: dnsx kurulu değil — atlandı")
+
         # ── 3. HTTP probe (httpx) ────────────────────────────────────
         live_hosts: List[Dict[str, Any]] = []
         if self._stage_on("httpx") and have("httpx"):
@@ -168,6 +263,7 @@ class WebRecon:
                 r = run(cmd, timeout=self.timeout)
                 live_hosts = self._parse_httpx(r["stdout"])
                 self._write_raw(os.path.join(output_dir, "httpx.jsonl"), r["stdout"])
+            self._warn_if_failed(reporter, r, "httpx")
             stages_run.append("httpx")
             reporter.done(f"{len(live_hosts)} canlı web servisi",
                           os.path.join(output_dir, "httpx.jsonl"))
@@ -180,12 +276,43 @@ class WebRecon:
         live_file = os.path.join(output_dir, "livehosts.txt")
         self._write_lines(live_file, live_urls)
 
+        # ── 3b. Git deposu ifşası doğrulama ──────────────────────────
+        # Her canlı host için /.git/HEAD'i gerçekten indirir (triage.py'nin sadece
+        # URL string'ine bakan pasif tespitinden farklı olarak içeriği doğrular).
+        if self._stage_on("gitcheck"):
+            with reporter.stage("Git deposu ifşası kontrolü (/.git/HEAD)"):
+                git_findings = git_check.check(live_urls, timeout=self.timeout,
+                                               scope_checker=_in_scope)
+                findings.extend(git_findings)
+            stages_run.append("gitcheck")
+            if git_findings:
+                reporter.done(f"{len(git_findings)} git deposu ifşası ⚠️")
+            else:
+                reporter.done("git ifşası yok")
+        else:
+            stages_skipped.append("gitcheck")
+
+        # ── 3c. CORS yanlış yapılandırma kontrolü ────────────────────
+        if self._stage_on("cors"):
+            with reporter.stage("CORS yanlış yapılandırma kontrolü"):
+                cors_findings = cors_check.check(live_urls, timeout=self.timeout,
+                                                 scope_checker=_in_scope)
+                findings.extend(cors_findings)
+            stages_run.append("cors")
+            if cors_findings:
+                reporter.done(f"{len(cors_findings)} CORS yanlış yapılandırması ⚠️")
+            else:
+                reporter.done("CORS sorunu yok")
+        else:
+            stages_skipped.append("cors")
+
         # ── 4. URL/endpoint hasadı (katana aktif + gau pasif) ───────
         urls: List[str] = []
         if not self.passive_only and self._stage_on("katana") and have("katana"):
             with reporter.stage("URL/endpoint toplanıyor (katana — aktif crawl)"):
                 r = run(f"katana -list {live_file} -silent -jc -d 2", timeout=self.timeout)
                 urls.extend(self._lines(r["stdout"]))
+            self._warn_if_failed(reporter, r, "katana")
             stages_run.append("katana")
         else:
             stages_skipped.append("katana")
@@ -195,6 +322,7 @@ class WebRecon:
             with reporter.stage("Arşiv URL'leri toplanıyor (gau — pasif)"):
                 r = run(f"gau --threads {self.concurrency} {domain}", timeout=self.timeout)
                 urls.extend(self._lines(r["stdout"]))
+            self._warn_if_failed(reporter, r, "gau")
             stages_run.append("gau")
         else:
             stages_skipped.append("gau")
@@ -213,12 +341,19 @@ class WebRecon:
                 hosts = [h for h in live_urls if _in_scope(urlparse(h).hostname or "")]
                 hosts = hosts[: self.ffuf_max_hosts]
                 ffuf_hits: List[str] = []
+                ffuf_fail_count = 0
                 with reporter.stage(f"İçerik keşfi (ffuf, {len(hosts)} host × wordlist)"):
                     for host in hosts:
-                        ffuf_hits.extend(self._ffuf_host(host, wordlist))
+                        hits, ok = self._ffuf_host(host, wordlist, output_dir)
+                        ffuf_hits.extend(hits)
+                        if not ok:
+                            ffuf_fail_count += 1
                 urls.extend(ffuf_hits)
                 stages_run.append("ffuf")
                 reporter.done(f"{len(ffuf_hits)} gizli path/dosya (ffuf)")
+                if ffuf_fail_count:
+                    reporter.error(f"ffuf {ffuf_fail_count}/{len(hosts)} host'ta "
+                                   f"sonuç dosyası oluşturamadı")
         else:
             stages_skipped.append("ffuf")
             if not have("ffuf"):
@@ -233,18 +368,38 @@ class WebRecon:
         if any(s in stages_run for s in ("katana", "gau", "ffuf")):
             reporter.done(f"{len(urls)} URL · {len(endpoints)} endpoint (toplam)", urls_file)
 
+        # ── 4c. Secret/API-key tarama (keşfedilen JS dosyaları) ──────
+        # 3.taraf/CDN dosyaları hariç tutulur (jquery vb.) — boşa istek harcamamak
+        # ve gürültüyü azaltmak için. Bulgular maskeli (ilk4+son4), tam secret hiçbir
+        # zaman diske/konsola yazılmaz. Pasif/düşük-riskli, --active gerektirmez.
+        if self._stage_on("secrets"):
+            with reporter.stage("Secret/API-key taraması (JS dosyaları)"):
+                secret_findings = secrets_scan.scan(
+                    urls, max_files=self.secrets_max_files, scope_checker=_in_scope)
+                findings.extend(secret_findings)
+            stages_run.append("secrets")
+            if secret_findings:
+                reporter.done(f"{len(secret_findings)} olası secret sızıntısı ⚠️")
+            else:
+                reporter.done("secret sızıntısı bulunamadı")
+        else:
+            stages_skipped.append("secrets")
+
         # ── 5. nuclei ────────────────────────────────────────────────
-        findings: List[Dict[str, Any]] = []
+        # NOT: `findings` fonksiyonun başında başlatıldı (subdomain-takeover da aynı
+        # listeye ekliyor) — burada sıfırlanmıyor, üzerine ekleniyor (extend).
         if self._stage_on("nuclei") and live_urls and have("nuclei"):
             with reporter.stage(f"Zafiyet taraması (nuclei, {len(live_urls)} host)"):
-                cmd = (f"nuclei -l {live_file} -silent -severity {self.nuclei_severity} "
-                       f"-no-color -rl {self.rate_limit}")
+                cmd = (f"nuclei -l {live_file} -jsonl -silent -severity {self.nuclei_severity} "
+                       f"-rl {self.rate_limit}")
                 r = run(cmd, timeout=self.timeout)
-                self._write_raw(os.path.join(output_dir, "nuclei.txt"), r["stdout"])
-                findings = self._parse_nuclei(r["stdout"])
+                self._write_raw(os.path.join(output_dir, "nuclei.jsonl"), r["stdout"])
+                nuclei_findings = self._parse_nuclei(r["stdout"])
+                findings.extend(nuclei_findings)
+            self._warn_if_failed(reporter, r, "nuclei")
             stages_run.append("nuclei")
-            reporter.done(f"{len(findings)} nuclei bulgusu",
-                          os.path.join(output_dir, "nuclei.txt"))
+            reporter.done(f"{len(nuclei_findings)} nuclei bulgusu",
+                          os.path.join(output_dir, "nuclei.jsonl"))
         else:
             stages_skipped.append("nuclei")
             reporter.skip("Zafiyet taraması (nuclei) kurulu değil — atlandı")
@@ -282,22 +437,31 @@ class WebRecon:
         return hosts
 
     def _parse_nuclei(self, stdout: str) -> List[Dict[str, Any]]:
+        """nuclei `-jsonl` çıktısını parse eder (satır satır JSON). Eskiden insan-okunur
+        metin çıktısı regex ile parse ediliyordu; extractor kullanan template'lerde
+        reproduction URL'i yanlış çıkarabiliyordu (satırdaki SON kelimeyi URL sanıyordu,
+        oysa extractor sonucu varsa son kelime çıkarılan değer olabiliyordu). JSON alan
+        adları resmi nuclei çıktı şemasından doğrulandı: template-id, info.severity,
+        info.name, matched-at, extracted-results, curl-command."""
         findings: List[Dict[str, Any]] = []
-        pattern = re.compile(r"\[(.*?)\]\s+\[(.*?)\]\s+\[(.*?)\]\s+(.*)")
-        cvss_map = {"critical": 9.8, "high": 7.5, "medium": 5.5, "low": 3.1, "info": 0.0}
+        cvss_map = {"critical": 9.8, "high": 7.5, "medium": 5.5, "low": 3.1}
         for line in self._lines(stdout):
-            m = pattern.search(line)
-            if not m:
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
                 continue
-            template_id, _proto, sev, evidence = m.group(1), m.group(2), m.group(3).lower(), m.group(4)
-            if sev not in cvss_map or sev == "info":
+            info = obj.get("info") or {}
+            sev = str(info.get("severity") or "").lower()
+            if sev not in cvss_map:
                 continue
+            matched_at = obj.get("matched-at", "") or obj.get("host", "")
             findings.append({
-                "title": f"Nuclei: {template_id}",
+                "title": f"Nuclei: {obj.get('template-id', '')}",
                 "severity": sev,
-                "description": f"Nuclei '{template_id}' template'i ile zafiyet/misconfig tespit edildi.",
-                "evidence": evidence.strip(),
-                "reproduction": f"nuclei -id {template_id} -u {evidence.strip().split()[-1] if evidence.strip() else ''}".strip(),
+                "description": info.get("name") or f"Nuclei template: {obj.get('template-id', '')}",
+                "evidence": ", ".join(obj.get("extracted-results") or []) or matched_at,
+                "matched_at": matched_at,
+                "reproduction": obj.get("curl-command", "") or matched_at,
                 "cvss": cvss_map[sev],
             })
         return findings

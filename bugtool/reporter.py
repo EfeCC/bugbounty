@@ -1,14 +1,16 @@
 """İlerleme raporlayıcı — CLI'de süreç şeffaflığı.
-
 Amaç: kullanıcı "hangi aşamadayım, devam mı ediyor, ne buldum, nereye kaydedildi" görsün.
 Uzun aşamalarda (httpx/nuclei/katana) spinner döner → donmadığı belli olur.
-
 `NullReporter`  : kütüphane (webrecon/fuzzer) ve testler için — hiçbir şey basmaz.
-`ConsoleReporter`: CLI için — rich spinner + aşama sonucu + kaydedilen yol.
-
+`ConsoleReporter`: CLI için — rich spinner + aşama sonucu + kaydedilen yol + hata.
 Kütüphane kodu (webrecon) yalnızca bu arayüzü çağırır; sunum tamamen CLI'nin işi
-(bağımsızlık korunur, testler sessiz kalır)."""
+(bağımsızlık korunur, testler sessiz kalır).
 
+EKLENDİ (önceki incelemede bulundu): `error()` metodu. Eskiden bir aşama (subfinder/
+nuclei/…) binary VARKEN çalışıp hata verirse bunu görme imkanı yoktu — "0 sonuç"
+ile "araç kırıldı" ayrımı kayboluyordu. `webrecon.py` artık her `run()` sonrası
+başarısızlığı bu metotla yüzeye çıkarıyor.
+"""
 from contextlib import contextmanager
 
 
@@ -26,6 +28,9 @@ class NullReporter:
         pass
 
     def info(self, msg):
+        pass
+
+    def error(self, msg):
         pass
 
 
@@ -54,3 +59,7 @@ class ConsoleReporter:
 
     def info(self, msg):
         self.console.print(f"[dim]  {msg}[/dim]")
+
+    def error(self, msg):
+        """Aşama ÇALIŞTI ama hata verdi — '0 sonuç' ile 'araç kırıldı' farkını gösterir."""
+        self.console.print(f"[bold red]  ❌ {msg}[/bold red]")

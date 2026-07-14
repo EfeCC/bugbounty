@@ -14,7 +14,8 @@ scope:
   scope_file: "scope.txt"
 
 # ── Web Recon (DETERMİNİSTİK, LLM YOK) ─────────────────────
-# Aşamalar: subfinder → dnsx → httpx → (katana + gau + ffuf) → nuclei. Binary yoksa atlanır.
+# Aşamalar: subfinder+crt.sh → dnsx → takeover → httpx → git/cors → (katana+gau+ffuf)
+#           → secrets → nuclei. Binary/bağımlılık yoksa aşama SESSİZCE atlanır.
 webrecon:
   passive_only: false          # true = aktif crawl (katana) + ffuf kapalı; sadece pasif kaynaklar
   rate_limit: 150              # httpx/nuclei/ffuf istek/sn üst sınırı (sınırlı VM için düşür: 50)
@@ -22,7 +23,12 @@ webrecon:
   nuclei_severity: "low,medium,high,critical"
   max_urls: 3000
   timeout: 600
-  stages: {}                   # aşama kapatma, örn: {nuclei: false, katana: false, ffuf: false}
+  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets) hepsi pasif/
+  # düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
+  #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false}
+  # ctlogs/gitcheck/cors/secrets 'requests' yoksa, takeover 'dnsx' yoksa kendiliğinden atlanır.
+  stages: {}
+  secrets_max_files: 40        # secret taraması için indirilecek max JS dosyası (cap)
   # İçerik keşfi / dizin brute (ffuf) — linklenmemiş /admin, /.git, /backup yollarını bulur
   ffuf_wordlist: ""            # boşsa yaygın SecLists/dirb konumları otomatik denenir
   ffuf_max_hosts: 10           # kaç canlı host'ta ffuf koşulsun (patlamayı önler)
