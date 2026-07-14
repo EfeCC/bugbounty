@@ -33,14 +33,21 @@ test edilir. `recon`/`triage` ayrı ayrı da kullanılabilir.
 Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](docs/windsurf-workflow.md)
 
 ## Mimari
-- `bugtool/scope.py` — kapsam kontrolü (domain wildcard + CIDR + scope dosyası)
-- `bugtool/webrecon.py` — recon pipeline (subfinder→dnsx→httpx→katana/gau/**ffuf**→nuclei)
-- `bugtool/monitor.py` — baseline diff + webhook bildirimi
+- `bugtool/scope.py` — kapsam kontrolü (domain wildcard + CIDR + scope dosyası, fail-closed)
+- `bugtool/webrecon.py` — recon pipeline: subfinder+crt.sh→dnsx→takeover→httpx→git/cors→
+  katana/gau/**ffuf**→secrets→nuclei
+- `bugtool/ct_logs.py` — crt.sh pasif subdomain kaynağı
+- `bugtool/takeover.py` — subdomain takeover (dangling CNAME, 18 servis)
+- `bugtool/git_check.py` — `/.git/HEAD` ifşa doğrulama
+- `bugtool/cors_check.py` — CORS misconfig (reflection + credentials)
+- `bugtool/secrets_scan.py` — JS'te sızmış API-key (maskeli, 25 servis)
+- `bugtool/monitor.py` — baseline diff (yeni + kaybolan asset) + webhook bildirimi
 - `bugtool/triage.py` — pasif çıktı analizi (tehlikeli param/dosya/tech)
 - `bugtool/payloads.py` — **tek-kaynak** payload arsenali + detektörler (encode/WAF-bypass)
-- `bugtool/fuzzer.py` — aktif param testi (scope-gated, non-destructive detection)
+- `bugtool/fuzzer.py` — aktif param testi (scope-gated, non-destructive, 403/429 backoff)
+- `bugtool/reporter.py` — canlı ilerleme (spinner + aşama sonucu)
 - `bugtool/shell.py` — subprocess yardımcı katmanı
-- `main.py` — CLI (click)
+- `main.py` — CLI (click): `hunt` / `recon` / `monitor` / `triage`
 
 ## Güvenlik notu
 Yalnızca **yetkili** hedeflerde (kendi scope.txt'in) kullan. `triage --active` aktif trafik

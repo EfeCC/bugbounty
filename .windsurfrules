@@ -18,7 +18,9 @@ sömürü komutu içermiyor.
   zaten diskte — onları oku.
 
 ## 3. İzinli (otomatik yapabilirsin — hepsi read-only / pasif)
-- `python main.py recon <domain>`   — subdomain→httpx→ffuf→url→nuclei (deterministik, LLM'siz)
+- `python main.py recon <domain>`   — subdomain(+crt.sh)→dnsx→takeover→httpx→git/cors→
+  ffuf→url→secrets→nuclei (deterministik, LLM'siz). takeover/git/cors/secrets/ct_logs
+  PASİF/düşük-riskli (tek GET, tarayıcı kadar zararsız) — --active gerektirmez.
 - `python main.py hunt <domain>`    — recon → PASİF triyaj otomatik zincir (--active YOKsa pasif)
 - `python main.py monitor <domain>` — yeni-asset diff
 - `python main.py triage`           — PASİF triyaj (ağ yok, sadece artifact okur/işaretler)
