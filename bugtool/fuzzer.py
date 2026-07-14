@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qsl, quote, urlparse, urlunparse
 
 from . import payloads as P
+from . import timing
 
 _DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 bugtool")
@@ -49,7 +50,8 @@ class ParamFuzzer:
                  delay: float = 0.0, max_requests: int = 500, timeout: int = 10,
                  classes: Optional[List[str]] = None, headers: Optional[Dict[str, str]] = None,
                  verify_tls: bool = False, test_all_if_no_hint: bool = False,
-                 block_threshold: int = 8):
+                 block_threshold: int = 8, ladder_doses: Optional[List[float]] = None,
+                 ladder_rounds: int = 2):
         self.scope_checker = scope_checker
         self.delay = float(delay)
         self.max_requests = int(max_requests)
@@ -58,6 +60,9 @@ class ParamFuzzer:
         self.headers = {"User-Agent": _DEFAULT_UA, **(headers or {})}
         self.verify_tls = verify_tls
         self.test_all_if_no_hint = test_all_if_no_hint
+        # Timing-ladder (doz-yanıt) — ucuz probe şüpheli olunca doz merdiveniyle doğrula
+        self.ladder_doses = ladder_doses or timing.DEFAULT_DOSES
+        self.ladder_rounds = int(ladder_rounds)
         # DÜZELTME (bu turda eklendi): hedef art arda 403/429 dönmeye başlarsa
         # (WAF/rate-limit tetiklendi demektir) taramayı erken durdurur — hem
         # bütçeyi boşa harcamaz hem hedefe karşı daha kibar davranır.
@@ -94,6 +99,8 @@ class ParamFuzzer:
             verify_tls=bool(fc.get("verify_tls", False)),
             test_all_if_no_hint=bool(fc.get("test_all_if_no_hint", False)),
             block_threshold=int(fc.get("block_threshold", 8)),
+            ladder_doses=fc.get("ladder_doses") or None,
+            ladder_rounds=int(fc.get("ladder_rounds", 2)),
         )
 
     def _in_scope(self, url: str) -> bool:
@@ -187,28 +194,56 @@ class ParamFuzzer:
                 evidence = spec["detect"](resp, meta)
                 if not evidence:
                     continue
-                # Zaman-tabanlı pozitifi ikinci istekle teyit et (FP azaltma)
+                verdict = "fired"
+                # Zaman-tabanlı pozitifi TEK istekle değil, doz merdiveniyle (dose-response)
+                # doğrula → ağ gürültüsü kaynaklı FP'yi ele, üç-durumlu verdict üret.
                 if meta.get("t") == "time":
-                    confirm = self._request(test_url, marker=marker)
-                    if confirm is None or confirm["elapsed"] < baseline["elapsed"] + P.SLEEP_THRESHOLD:
+                    lv, slope = self._timing_ladder(url, param, meta["p"], baseline)
+                    if lv == timing.NOT_FIRED:
                         continue
-                out.append(self._finding(cls, url, param, payload, evidence, meta))
+                    verdict = "fired" if lv == timing.FIRED else "inconclusive"
+                    evidence += f" · doz-yanıt eğimi={slope:.2f} ({lv})"
+                out.append(self._finding(cls, url, param, payload, evidence, meta, verdict))
                 break   # sınıf başına ilk kanıt yeter — istek şişmesini önle
         return out
 
-    def _finding(self, cls, url, param, payload, evidence, meta) -> Dict[str, Any]:
+    def _timing_ladder(self, url: str, param: str, template: str,
+                       baseline: Dict[str, Any]) -> tuple:
+        """Doz merdivenini (sleep 0/2/4/6s × N tur) yollar, doz-yanıt verdict'i döner.
+        Ucuz probe zaten 'yavaş' bulduktan SONRA çağrılır → maliyeti sadece şüpheli
+        adaylarda öder. Döner: (timing verdict, eğim)."""
+        measurements: Dict[float, List[float]] = {}
+        for dose in self.ladder_doses:
+            times: List[float] = []
+            for _ in range(self.ladder_rounds):
+                if self._sent >= self.max_requests:
+                    return timing.NOT_FIRED, 0.0
+                marker = P.make_marker()
+                payload = P.render_payload(template, marker, sleep=dose)
+                resp = self._request(self._build_url(url, param, payload), marker=marker)
+                if resp is not None:
+                    times.append(resp["elapsed"])
+            if times:
+                measurements[dose] = times
+        return timing.evaluate_ladder(list(self.ladder_doses), measurements)
+
+    def _finding(self, cls, url, param, payload, evidence, meta, verdict="fired") -> Dict[str, Any]:
         conf = "high" if meta.get("t") in ("time", "error") or cls in ("lfi", "ssti") else "medium"
+        if verdict == "inconclusive":
+            conf = "low"
         return {
             "class": cls,
             "severity": _SEVERITY.get(cls, "medium"),
             "confidence": conf,
+            "verdict": verdict,               # fired | inconclusive (üç-durumlu oracle)
             "url": url,
             "param": param,
             "payload": payload,
             "evidence": evidence,
             "reproduction": self._build_url(url, param, payload),
-            "status": "unverified",
-            "note": "POTANSİYEL — otomatik tespit, manuel doğrulama şart.",
+            "status": "unverified" if verdict == "fired" else "inconclusive",
+            "note": ("POTANSİYEL — otomatik tespit, manuel doğrulama şart." if verdict == "fired"
+                     else "BELİRSİZ (INCONCLUSIVE) — sinyal var ama kanıt zayıf, ÖNCELİKLE elle bak."),
         }
 
     # ── HTTP ──────────────────────────────────────────────────────────────────

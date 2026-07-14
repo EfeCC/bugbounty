@@ -276,9 +276,15 @@ CLASSES: Dict[str, Dict[str, Any]] = {
 ALL_CLASSES: List[str] = list(CLASSES.keys())
 
 
-def render_payload(template: str, marker: str) -> str:
-    """`{M}` (marker) ve `{S}` (sleep saniyesi) yer tutucularını doldurur."""
-    return template.replace("{M}", marker).replace("{S}", str(SLEEP_SECONDS))
+def render_payload(template: str, marker: str, sleep: Optional[float] = None) -> str:
+    """`{M}` (marker) ve `{S}` (sleep saniyesi) yer tutucularını doldurur.
+    `sleep` verilirse `{S}` o doz ile doldurulur (timing-ladder için); yoksa varsayılan
+    SLEEP_SECONDS. Doz tam sayıysa ondalık basılmaz (SQL/`sleep` sözdizimi için)."""
+    if sleep is None:
+        sleep_str = str(SLEEP_SECONDS)
+    else:
+        sleep_str = str(int(sleep)) if float(sleep).is_integer() else str(sleep)
+    return template.replace("{M}", marker).replace("{S}", sleep_str)
 
 
 def hints_for_param(param: str) -> List[str]:

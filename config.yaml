@@ -53,3 +53,7 @@ fuzz:
   test_all_if_no_hint: true    # true = ipucu olmayan param'da da TÜM sınıfları dene ("ne olursa");
                                # false = sadece xss/sqli/redirect (akıllı bütçe, sınırlı VM için)
   classes: null                # null = tüm sınıflar; örn ["xss","sqli","lfi"] ile daralt
+  # Timing-ladder (doz-yanıt): zaman-tabanlı SQLi/CMDi'yi tek sleep yerine doz merdiveniyle
+  # doğrular → ağ gürültüsü FP'sini eler, FIRED/INCONCLUSIVE/NOT_FIRED üretir.
+  ladder_doses: [0, 2, 4, 6]   # sleep dozları (sn); yanıt süresi bunlarla doğrusal artmalı
+  ladder_rounds: 2             # her doz kaç tur ölçülsün (medyan alınır; artırınca daha sağlam/yavaş)

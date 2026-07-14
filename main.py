@@ -248,8 +248,12 @@ def _run_active_test(result: dict, config: dict, session_dir: str):
         border_style="red"))
 
     def _report(f):
-        console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
-                      f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
+        if f.get("verdict") == "inconclusive":
+            console.print(f"  [yellow]❓ {f['class'].upper()} (BELİRSİZ)[/yellow] "
+                          f"{f['param']} @ {f['url'][:66]} — {f['evidence'][:80]}")
+        else:
+            console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
+                          f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
 
     with console.status("[bold red]Aktif test başlıyor…[/bold red]", spinner="dots") as status:
         def _progress(i, total, sent, nf):
@@ -258,8 +262,13 @@ def _run_active_test(result: dict, config: dict, session_dir: str):
         findings = fuzzer.fuzz_targets(result["param_targets"],
                                        on_finding=_report, on_progress=_progress)
 
+    fired = [f for f in findings if f.get("verdict") != "inconclusive"]
+    incon = [f for f in findings if f.get("verdict") == "inconclusive"]
     console.print(f"\n[bold]Aktif test bitti — {fuzzer._sent} istek, "
-                  f"{len(findings)} POTANSİYEL bulgu.[/bold]")
+                  f"{len(fired)} POTANSİYEL + {len(incon)} BELİRSİZ bulgu.[/bold]")
+    if fuzzer.backoff_triggered:
+        console.print("[yellow]  ⚠ Hedef art arda 403/429 döndü — WAF/rate-limit'e çarpıldı, "
+                      "tarama erken durduruldu.[/yellow]")
     out_file = os.path.join(session_dir, "triage_findings.json")
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump({"findings": findings}, f, indent=2, ensure_ascii=False)

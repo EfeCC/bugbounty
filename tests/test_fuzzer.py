@@ -3,12 +3,24 @@
 Detection akışı: payload bas → sahte cevap → detektör → POTANSİYEL bulgu. Ayrıca
 scope-gating ve max_requests cap'i doğrular (güvenlik korkulukları)."""
 
+import re
 from urllib.parse import unquote
 
 import pytest
 
 import bugtool.payloads as P
+import bugtool.timing as timing
 from bugtool.fuzzer import ParamFuzzer
+
+
+def _dose_request(self, url, marker=""):
+    """Sahte _request: URL'deki sleep dozuna göre elapsed döndürür (gerçek enjeksiyon gibi
+    süre ≈ 0.1 + doz). Timing-ladder'ı ağsız/deterministik test etmek için."""
+    self._sent += 1
+    m = re.search(r"sleep[\s(%]*?(\d+)", unquote(url), re.I)
+    dose = float(m.group(1)) if m else 0.0
+    return {"body": "", "headers": {}, "status": 200, "elapsed": 0.1 + dose,
+            "baseline_elapsed": 0.0, "baseline_body": "", "marker": marker}
 
 
 class FakeResp:
@@ -155,3 +167,37 @@ def test_sqli_baseline_fp_suppressed(monkeypatch):
     fz = ParamFuzzer()
     targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
     assert "sqli" not in _classes_of(fz.fuzz_targets(targets))
+
+
+def test_timing_ladder_fires(monkeypatch):
+    # Temiz doğrusal doz-yanıt (süre ≈ 0.1 + doz) → zaman-tabanlı SQLi FIRED
+    monkeypatch.setattr(ParamFuzzer, "_request", _dose_request)
+    fz = ParamFuzzer(ladder_rounds=2)
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    sqli = [f for f in fz.fuzz_targets(targets) if f["class"] == "sqli"]
+    assert sqli
+    assert sqli[0]["verdict"] == "fired"
+
+
+def test_timing_ladder_not_fired_drops(monkeypatch):
+    # Ucuz probe yavaş (fire) AMA merdiven NOT_FIRED (gürültü) → bulgu düşer
+    monkeypatch.setattr(ParamFuzzer, "_request", _dose_request)
+    monkeypatch.setattr(ParamFuzzer, "_timing_ladder",
+                        lambda self, u, p, t, b: (timing.NOT_FIRED, 0.0))
+    fz = ParamFuzzer()
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    assert "sqli" not in _classes_of(fz.fuzz_targets(targets))
+
+
+def test_timing_ladder_inconclusive(monkeypatch):
+    # Merdiven INCONCLUSIVE → bulgu üretilir ama 'inconclusive' etiketli, düşük güven
+    monkeypatch.setattr(ParamFuzzer, "_request", _dose_request)
+    monkeypatch.setattr(ParamFuzzer, "_timing_ladder",
+                        lambda self, u, p, t, b: (timing.INCONCLUSIVE, 0.4))
+    fz = ParamFuzzer()
+    targets = [{"url": "http://a.example.com/p?id=1", "params": {"id": ["sqli"]}}]
+    sqli = [f for f in fz.fuzz_targets(targets) if f["class"] == "sqli"]
+    assert sqli
+    assert sqli[0]["verdict"] == "inconclusive"
+    assert sqli[0]["status"] == "inconclusive"
+    assert sqli[0]["confidence"] == "low"
