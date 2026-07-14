@@ -171,6 +171,33 @@ class ParamFuzzer:
     def _has_hint(target: Dict[str, Any]) -> bool:
         return any(hinted for hinted in (target.get("params") or {}).values())
 
+    # ── OOB / OAST prob ekimi (kör zafiyetler) ────────────────────────────────
+    def plant_oob(self, param_targets: List[Dict[str, Any]], oob,
+                  on_progress: Optional[Callable[[int, int, int, int], None]] = None) -> int:
+        """Her parametreye korele OOB payload'ları (kör SSRF/CMDi/XSS) gömer ve
+        `oob.probes`'a kaydeder. Callback'ler ASENKRON — burada doğrulama YOK, sadece
+        ekim; doğrulama sonra collaborator + `oob.correlate` ile. Ekilen prob sayısını döner.
+        Scope-gated: kapsam-dışı host'a hiç prob gitmez."""
+        if not self.available:
+            return 0
+        planted = 0
+        templates = oob.templates()
+        total = len(param_targets)
+        for i, target in enumerate(param_targets, 1):
+            url = target.get("url", "")
+            if url and self._in_scope(url):
+                for param in (target.get("params") or {}):
+                    for cls, tmpls in templates.items():
+                        for tmpl in tmpls[:2]:      # sınıf başına en çok 2 (bütçe)
+                            if self._sent >= self.max_requests:
+                                return planted
+                            _token, payload = oob.plant(cls, url, param, tmpl)
+                            self._request(self._build_url(url, param, payload))
+                            planted += 1
+            if on_progress:
+                on_progress(i, total, self._sent, planted)
+        return planted
+
     def _classes_for(self, hinted: List[str]) -> List[str]:
         wanted = set(hinted or []) | set(_ALWAYS)
         if not hinted and self.test_all_if_no_hint:

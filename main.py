@@ -20,6 +20,7 @@ from bugtool.scope import ScopeChecker
 from bugtool.triage import Triage
 from bugtool.fuzzer import ParamFuzzer
 from bugtool.reporter import ConsoleReporter
+from bugtool.oob import OobManager, read_hit_tokens
 
 console = Console()
 
@@ -215,7 +216,29 @@ def _render_triage(result: dict):
                 console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
 
 
-def _run_active_test(result: dict, config: dict, session_dir: str):
+def _plant_oob(result: dict, config: dict, session_dir: str, oob_domain: str, checker):
+    """OOB problarını (kör SSRF/CMDi/XSS) gömer, prob deposunu kaydeder, kullanıcıya
+    collaborator'ında ne arayacağını + nasıl korele edeceğini söyler."""
+    fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)
+    if not fuzzer.available:
+        console.print("[bold red]❌ 'requests' kurulu değil — OOB probu gömülemiyor.[/bold red]")
+        return
+    oob = OobManager(oob_domain, seed=os.path.basename(session_dir.rstrip("/\\")) or "bugtool")
+    console.print(Panel(
+        f"[bold magenta]📡 OOB / OAST prob ekimi[/bold magenta] — collaborator: {oob_domain}\n"
+        f"[dim]Kör SSRF/CMDi/XSS için korele token'lı payload'lar gömülüyor "
+        f"(scope-içi).[/dim]", border_style="magenta"))
+    with console.status("[magenta]OOB probları gömülüyor…[/magenta]", spinner="dots"):
+        planted = fuzzer.plant_oob(result["param_targets"], oob)
+    probe_file = os.path.join(session_dir, "oob_probes.json")
+    oob.save(probe_file)
+    console.print(f"[bold]{planted} OOB probu gömüldü[/bold] — depo: {probe_file}")
+    console.print(f"[dim]  1) Collaborator panelinde/{oob_domain} altında gelen callback'leri izle.[/dim]")
+    console.print(f"[dim]  2) Gelen token'ları bir dosyaya al, sonra:[/dim]")
+    console.print(f"[cyan]     python main.py oob-correlate --dir {session_dir} --hits hits.txt[/cyan]")
+
+
+def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: str = ""):
     """Aktif detection-payload testini çalıştırır (opt-in). POTANSİYEL bulguları kaydeder.
 
     GÜVENLİK: gerçek bir kapsam (scope.txt dolu VEYA allowed_targets) yoksa SERT DURUR —
@@ -276,12 +299,19 @@ def _run_active_test(result: dict, config: dict, session_dir: str):
     if findings:
         console.print("[dim]  Hepsi POTANSİYEL — Windsurf/Burp ile manuel doğrula.[/dim]")
 
+    # ── OOB / OAST (kör açıklar) — opsiyonel, collaborator domain'i verildiyse ──
+    if oob_domain:
+        console.print()
+        _plant_oob(result, config, session_dir, oob_domain, checker)
+
 
 @cli.command()
 @click.option("--dir", "session_dir", default="", help="Recon oturum dizini (boşsa reports/ altındaki en son)")
 @click.option("--active", is_flag=True, default=False,
               help="AKTİF test: bulunan parametrelere detection payload'ları bas (scope-içi, opt-in)")
-def triage(session_dir, active):
+@click.option("--oob", "oob_domain", default="",
+              help="OOB/OAST collaborator domain'i (interactsh/Burp) — kör SSRF/CMDi/XSS probu göm")
+def triage(session_dir, active, oob_domain):
     """🔎 Triyaj: recon çıktısını analiz et → tehlikeli param/dosya/tech işaretle.
 
     --active ile bulunan parametreler XSS/SQLi/LFI/SSTI/redirect/CRLF/CMDi/SSRF için
@@ -308,7 +338,7 @@ def triage(session_dir, active):
     if not active:
         console.print("\n[dim]  Aktif test için: python main.py triage --active[/dim]")
         return
-    _run_active_test(result, config, session_dir)
+    _run_active_test(result, config, session_dir, oob_domain=oob_domain)
 
 
 @cli.command()
@@ -316,7 +346,9 @@ def triage(session_dir, active):
 @click.option("--passive", is_flag=True, default=False, help="Sadece pasif kaynaklar (aktif crawl/ffuf kapalı)")
 @click.option("--active", is_flag=True, default=False,
               help="Triyaj sonrası AKTİF payload testi de yap (scope-içi, opt-in)")
-def hunt(target, passive, active):
+@click.option("--oob", "oob_domain", default="",
+              help="OOB/OAST collaborator domain'i (interactsh/Burp) — kör SSRF/CMDi/XSS probu göm")
+def hunt(target, passive, active, oob_domain):
     """🎯 Hunt: TEK KOMUTTA recon → triyaj (→ opsiyonel aktif test).
 
     recon (subdomain→httpx→ffuf→url→nuclei) + triyaj (param/dosya/tech) otomatik zincir.
@@ -349,10 +381,57 @@ def hunt(target, passive, active):
     _render_triage(result)
 
     if active:
-        _run_active_test(result, config, output_dir)
+        _run_active_test(result, config, output_dir, oob_domain=oob_domain)
     else:
         console.print("\n[dim]  Aktif test için: python main.py hunt "
                       f"{target} --active[/dim]")
+
+
+@cli.command(name="oob-correlate")
+@click.option("--dir", "session_dir", default="", help="OOB probunun gömüldüğü oturum (boşsa en son)")
+@click.option("--hits", "hits_file", required=True,
+              help="Collaborator callback token'larını içeren dosya (interactsh çıktısı / elle kopyalanan)")
+def oob_correlate(session_dir, hits_file):
+    """📡 OOB callback'lerini gömülü problarla eşleştir → KANITLANMIŞ kör bulgu.
+
+    `--oob` ile prob gömdükten sonra collaborator'ında gelen token'ları bir dosyaya al,
+    sonra bunu çalıştır. Eşleşen her prob 'confirmed_oob' olarak triage_findings.json'a eklenir.
+    """
+    if not session_dir:
+        session_dir = _latest_reports_dir()
+    probe_file = os.path.join(session_dir or "", "oob_probes.json")
+    oob = OobManager.load(probe_file)
+    if oob is None:
+        console.print(f"[bold red]❌ OOB prob deposu bulunamadı: {probe_file}[/bold red]")
+        return
+    hits = read_hit_tokens(hits_file)
+    if not hits:
+        console.print(f"[yellow]  {hits_file} boş ya da okunamadı — callback token'ı yok.[/yellow]")
+        return
+
+    confirmed = oob.correlate(hits)
+    console.print(Panel(f"[bold magenta]📡 OOB Korelasyon[/bold magenta] — {len(oob.probes)} prob, "
+                        f"{len(hits)} callback → [bold]{len(confirmed)} KANITLANMIŞ kör bulgu[/bold]",
+                        border_style="magenta"))
+    for f in confirmed:
+        console.print(f"  [bold red]✅ {f['class'].upper()}[/bold red] {f['param']} @ "
+                      f"{f['url'][:70]} — {f['evidence'][:90]}")
+    if not confirmed:
+        console.print("[dim]  Eşleşme yok — gelen token'lar bu oturumun problarıyla örtüşmüyor.[/dim]")
+        return
+
+    # Mevcut triage_findings.json'a ekle (varsa)
+    out_file = os.path.join(session_dir, "triage_findings.json")
+    existing = []
+    if os.path.exists(out_file):
+        try:
+            with open(out_file, "r", encoding="utf-8") as f:
+                existing = (json.load(f) or {}).get("findings", [])
+        except (OSError, ValueError):
+            existing = []
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump({"findings": existing + confirmed}, f, indent=2, ensure_ascii=False)
+    console.print(f"[dim]  Bulgulara eklendi: {out_file}[/dim]")
 
 
 if __name__ == "__main__":

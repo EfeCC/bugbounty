@@ -29,6 +29,17 @@ test edilir. `recon`/`triage` ayrı ayrı da kullanılabilir.
 `triage --active` bulunan parametrelere **non-destructive detection payload'ları** basar
 (XSS/SQLi/LFI/SSTI/open-redirect/CRLF/CMDi/SSRF) — scope-gated, rate-limited. Bulgular
 `reports/<oturum>/triage_findings.json`'a POTANSİYEL olarak yazılır (manuel doğrulama şart).
+Zaman-tabanlı SQLi/CMDi doz-yanıt merdiveniyle doğrulanır (FIRED/INCONCLUSIVE), WAF'a takılan
+payload'lar mutasyonla atlatılmaya çalışılır (pozitif-kontrol).
+
+**Kör (blind) açıklar — OOB/OAST:**
+```bash
+python main.py hunt example.com --active --oob <senin-collaborator-domainin>
+# tarama sonrası collaborator'daki callback token'larını bir dosyaya al:
+python main.py oob-correlate --hits hits.txt
+```
+Kör SSRF/CMDi/XSS için `TOKEN.domain` gömülür; hedef o adrese istek atarsa callback gelir,
+`oob-correlate` eşleştirip `confirmed_oob` bulgusu üretir. Kendi interactsh/Burp Collaborator'ını kullan.
 
 Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](docs/windsurf-workflow.md)
 
@@ -44,6 +55,9 @@ Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](d
 - `bugtool/monitor.py` — baseline diff (yeni + kaybolan asset) + webhook bildirimi
 - `bugtool/triage.py` — pasif çıktı analizi (tehlikeli param/dosya/tech)
 - `bugtool/payloads.py` — **tek-kaynak** payload arsenali + detektörler (encode/WAF-bypass)
+- `bugtool/timing.py` — doz-yanıt (timing ladder) analizi + üç-durumlu oracle (FIRED/INCONCLUSIVE/NOT_FIRED)
+- `bugtool/mutator.py` — WAF-bypass mutasyonları + pozitif-kontrol (kanonik bloklandı→mutasyon geçti)
+- `bugtool/oob.py` — OOB/OAST: collaborator'a korele token'lı prob (kör SSRF/CMDi/XSS)
 - `bugtool/fuzzer.py` — aktif param testi (scope-gated, non-destructive, 403/429 backoff)
 - `bugtool/reporter.py` — canlı ilerleme (spinner + aşama sonucu)
 - `bugtool/shell.py` — subprocess yardımcı katmanı
