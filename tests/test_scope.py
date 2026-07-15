@@ -56,6 +56,24 @@ def test_load_scope_file_missing_is_graceful(tmp_path):
     assert allowed == [] and excluded == []
 
 
+def test_load_scope_file_inline_comment_stripped(tmp_path):
+    # Regresyon: satır-içi yorum ("!host  # not") yorum dahil excluded'a girmemeli —
+    # aksi halde hiçbir gerçek host o string'e eşit olamayacağı için yasak hiç tetiklenmez.
+    scope = tmp_path / "scope.txt"
+    scope.write_text(
+        "*.example.com  # ana kapsam\n"
+        "!admin.example.com  # buna dokunma\n"
+        "api.example.com# boşluksuz yorum\n",
+        encoding="utf-8")
+    allowed, excluded = load_scope_file(str(scope))
+    assert allowed == ["*.example.com", "api.example.com"]
+    assert excluded == ["admin.example.com"]
+    # Uçtan uca: gerçekten yasaklanıyor mu (ScopeChecker üzerinden)
+    checker = ScopeChecker(scope_file=str(scope))
+    assert checker.is_in_scope("admin.example.com") is False
+    assert checker.is_in_scope("api.example.com") is True
+
+
 def test_scope_checker_allowed_and_excluded(tmp_path):
     scope = tmp_path / "scope.txt"
     scope.write_text("*.example.com\n!admin.example.com\n", encoding="utf-8")

@@ -7,9 +7,18 @@ Binary çakışma sorunu (ör. Kali'de Python httpx ↔ ProjectDiscovery httpx):
   config.yaml → binaries bölümünden Go binary'sinin tam yolunu vererek çözülebilir.
   `set_binary_paths({"httpx": "/root/go/bin/httpx"})` → `have("httpx")` ve
   `run("httpx -l ...")` otomatik olarak doğru binary'yi kullanır.
+
+GÜVENLİK — DÜZELTME: eski sürüm `subprocess.run(command, shell=True, ...)` kullanıyordu
+ve `command` string'i `domain`/`target` gibi dışarıdan gelen değerlerle f-string ile
+kuruluyordu (webrecon.py). Bu değer `;`, `` ` ``, `$()`, `|` gibi shell metakarakteri
+içerirse ek komutlar çalıştırılabilirdi (komut enjeksiyonu — kendi makinene karşı).
+Şimdi `shell=False` + `shlex.split()` kullanılıyor: metakarakterler artık shell
+tarafından yorumlanmıyor, binary'e düz literal argüman olarak geçiyor. Hiçbir çağrı
+noktası pipe/redirect/`&&` kullanmadığı doğrulandı, bu değişiklik davranışı bozmaz.
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 from typing import Dict, Optional
@@ -75,22 +84,28 @@ def detect_httpx_conflict() -> Optional[str]:
 
 def run(command: str, timeout: int = 300, quiet: bool = True,
         env: Optional[Dict[str, str]] = None) -> Dict[str, object]:
-    """Komutu shell üzerinden çalıştırır; asla exception fırlatmaz (timeout/hata dahil).
+    """Komutu shell KULLANMADAN çalıştırır (bkz. modül docstring'i — komut enjeksiyonu
+    fix'i); asla exception fırlatmaz (timeout/hata dahil).
 
     Komutun ilk kelimesi (binary adı) registry'den çözümlenir — config.yaml'da
-    özel yol tanımlıysa otomatik kullanılır."""
-    # İlk token'ı (binary adı) resolve et
-    parts = command.split(None, 1)
-    if parts:
-        resolved = resolve(parts[0])
-        command = resolved + (" " + parts[1] if len(parts) > 1 else "")
-
+    özel yol tanımlıysa otomatik kullanılır (Kali httpx-çakışma çözümü vb.)."""
     if not quiet:
         print(f"  $ {command[:160]}")
     run_env = {**os.environ, **env} if env else None
     try:
+        args = shlex.split(command)
+    except ValueError as e:
+        # Eşleşmeyen tırnak vb. — çalıştırmayı denemeden güvenli şekilde hata dön.
+        return {"success": False, "stdout": "", "stderr": f"komut ayrıştırılamadı: {e}",
+                "return_code": -1, "command": command}
+    if not args:
+        return {"success": False, "stdout": "", "stderr": "boş komut",
+                "return_code": -1, "command": command}
+    # İlk token'ı (binary adı) resolve et — config.yaml → binaries override'ı burada uygulanır
+    args[0] = resolve(args[0])
+    try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
+            args, shell=False, capture_output=True, text=True,
             timeout=timeout, encoding="utf-8", errors="replace", env=run_env,
         )
         return {
@@ -102,6 +117,9 @@ def run(command: str, timeout: int = 300, quiet: bool = True,
         }
     except subprocess.TimeoutExpired:
         return {"success": False, "stdout": "", "stderr": f"timeout ({timeout}s)",
+                "return_code": -1, "command": command}
+    except FileNotFoundError as e:
+        return {"success": False, "stdout": "", "stderr": f"binary bulunamadı: {e}",
                 "return_code": -1, "command": command}
     except Exception as e:
         return {"success": False, "stdout": "", "stderr": str(e),

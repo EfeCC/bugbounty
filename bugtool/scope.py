@@ -46,8 +46,14 @@ def target_matches(target: str, scope_entry: str) -> bool:
 
 def load_scope_file(path: str) -> Tuple[List[str], List[str]]:
     """Scope dosyasını (allowed, excluded) listelerine ayrıştırır.
-    Yorumlar (#) ve boş satırlar atlanır; `!` ön eki = kapsam-dışı.
-    Dosya yoksa boş listeler döner (graceful-degrade)."""
+    Yorumlar (satır başı VEYA satır-içi `#`) ve boş satırlar atlanır; `!` ön eki =
+    kapsam-dışı. Dosya yoksa boş listeler döner (graceful-degrade).
+
+    DÜZELTME: eski sürüm sadece satır BAŞINDAKİ `#`'ı kontrol ediyordu — yani
+    `!admin.example.com  # dokunma` gibi bir satırda yorum dahil TÜM string excluded
+    listesine giriyordu ve hiçbir gerçek host o string'e eşit olamayacağı için exclude
+    kuralı sessizce hiç tetiklenmiyordu. Artık `#`'dan sonrası (satır başında da,
+    satır içinde de) her zaman kırpılıyor."""
     import os
     allowed: List[str] = []
     excluded: List[str] = []
@@ -55,9 +61,9 @@ def load_scope_file(path: str) -> Tuple[List[str], List[str]]:
         return allowed, excluded
     try:
         with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#"):
+            for raw_line in f:
+                s = raw_line.split("#", 1)[0].strip()
+                if not s:
                     continue
                 if s.startswith("!"):
                     excluded.append(s[1:].strip())
