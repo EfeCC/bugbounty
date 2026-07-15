@@ -10,6 +10,7 @@ Sadece bugtool'un gerçekten kullandığı binary'leri kontrol eder (kurulum tal
 
 import os
 import shutil
+import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from .shell import resolve
@@ -53,6 +54,19 @@ def _find_wordlist(config_wordlist: str = "") -> str:
     return ""
 
 
+def _verify_httpx_is_projectdiscovery(path: str) -> bool:
+    """Belirtilen yoldaki httpx'in ProjectDiscovery sürümü olup olmadığını kontrol eder."""
+    try:
+        result = subprocess.run(
+            [path, "-version"], capture_output=True, text=True,
+            timeout=5, encoding="utf-8", errors="replace"
+        )
+        output = ((result.stdout or "") + (result.stderr or "")).lower()
+        return "projectdiscovery" in output or "current" in output
+    except Exception:
+        return False
+
+
 def check_dependencies(config: Optional[dict] = None, console=None) -> Dict[str, bool]:
     """Tüm dış bağımlılıkları kontrol eder ve durumlarını konsola basar.
 
@@ -86,6 +100,25 @@ def check_dependencies(config: Optional[dict] = None, console=None) -> Dict[str,
 
         if available:
             resolved_path = shutil.which(resolve(name)) or "?"
+
+            # ── httpx özel kontrol: ProjectDiscovery sürümü mü? ──────
+            # Kali'de /usr/bin/httpx Python CLI'dır (YANLIŞ sürüm).
+            # ProjectDiscovery httpx -version çıktısında 'projectdiscovery' yazar.
+            if name == "httpx":
+                is_pd = _verify_httpx_is_projectdiscovery(resolved_path)
+                if is_pd:
+                    table.add_row(name, "[green]✅ VAR[/green]", desc,
+                                  f"{resolved_path} (ProjectDiscovery ✓)")
+                else:
+                    # Binary var ama YANLIŞ sürüm — kritik hata olarak işaretle
+                    results[name] = False
+                    missing_critical.append(name)
+                    table.add_row(name, "[bold red]⚠ YANLIŞ[/bold red]",
+                                  f"{desc} — Python httpx CLI!",
+                                  f"[red]{resolved_path} → config.yaml binaries.httpx: "
+                                  f"/usr/bin/httpx-toolkit[/red]")
+                continue
+
             table.add_row(name, "[green]✅ VAR[/green]", desc, resolved_path)
         else:
             if critical:

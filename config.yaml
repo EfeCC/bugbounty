@@ -7,7 +7,8 @@
 # Çakışma varsa Go binary'sinin TAM YOLUNU buraya yaz; boş = PATH'ten ara.
 # `which -a httpx` ile hangi httpx'lerin kurulu olduğunu görebilirsin.
 binaries:
-  httpx: ""          # örn: /root/go/bin/httpx veya /usr/local/bin/httpx
+  httpx: "/usr/bin/httpx-toolkit"   # Kali: apt httpx-toolkit = ProjectDiscovery Go sürümü
+                                    # /usr/bin/httpx Python CLI'dır, YANLIŞ — kullanma!
   # subfinder: ""
   # dnsx: ""
   # nuclei: ""
