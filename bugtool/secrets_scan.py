@@ -148,28 +148,66 @@ def _finding(url: str, name: str, masked_value: str, severity: str) -> Dict[str,
     }
 
 
-def scan(urls: List[str], max_files: int = 40, timeout: int = 10,
-         max_bytes: int = 2_000_000,
+def _fetch_one(url: str, timeout: int, max_bytes: int):
+    """Tek JS dosyasını indirir — paralel çağrılır. Başarılıysa [(url, içerik)], değilse
+    []. Session worker-başına (thread-safe). Kendi exception'ını yutar."""
+    import requests
+    try:
+        resp = requests.Session().get(url, timeout=timeout, verify=False,
+                                      headers={"User-Agent": _DEFAULT_UA})
+        return [(url, (resp.text or "")[:max_bytes])]
+    except Exception:
+        return []
+
+
+def _scan_content(url: str, content: str, seen_secrets: set, findings: List[Dict[str, Any]]):
+    """İndirilen içeriği secret kalıplarına karşı tarar (sıralı — `seen_secrets` dedup'ı
+    deterministik kalsın diye ağdan sonra tek thread'de yapılır)."""
+    for name, pattern, severity, group_idx in PATTERNS:
+        for m in pattern.finditer(content):
+            value = m.group(group_idx) if group_idx else m.group(0)
+            if _is_placeholder(value):
+                continue
+            masked = _mask(value)
+            key = (name, masked)
+            if key in seen_secrets:
+                continue
+            seen_secrets.add(key)
+            findings.append(_finding(url, name, masked, severity))
+    for m in _GENERIC_RE.finditer(content):
+        keyword, value = m.group(1), m.group(2)
+        if _is_placeholder(value):
+            continue
+        masked = _mask(value)
+        key = ("generic:" + keyword.lower(), masked)
+        if key in seen_secrets:
+            continue
+        seen_secrets.add(key)
+        findings.append(_finding(url, f"Olası {keyword} (bağlamsal, servis-özel değil)",
+                                 masked, "medium"))
+
+
+def scan(urls: List[str], max_files: int = 40, timeout: int = 8, max_bytes: int = 2_000_000,
+         concurrency: int = 20,
          scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
     """`urls` içindeki JS dosyalarını (cap'li, dedup'lı, 3.taraf/CDN hariç) indirip
-    bilinen secret kalıplarıyla tarar. `requests` kurulu değilse ya da hiç JS
-    dosyası yoksa boş liste döner (graceful-degrade)."""
-    findings: List[Dict[str, Any]] = []
+    bilinen secret kalıplarıyla tarar. İNDİRME paralel, tarama+dedup sıralı. `requests`
+    kurulu değilse ya da hiç JS dosyası yoksa boş liste döner (graceful-degrade)."""
     js_urls = _select_js_urls(urls, max_files)
     if not js_urls:
-        return findings
+        return []
     try:
-        import requests
+        import requests  # noqa: F401
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except ImportError:
             pass
     except ImportError:
-        return findings
+        return []
 
-    session = requests.Session()
-    seen_secrets = set()  # (isim, maskelenmiş_deger) tekrarini engelle (ayni secret birden fazla dosyada olabilir)
+    # scope-gate (kapsam-dışı URL indirilmez)
+    scoped = []
     for url in js_urls:
         host = urlparse(url).hostname or ""
         if scope_checker:
@@ -178,34 +216,13 @@ def scan(urls: List[str], max_files: int = 40, timeout: int = 10,
                     continue
             except Exception:
                 continue
-        try:
-            resp = session.get(url, timeout=timeout, verify=False,
-                               headers={"User-Agent": _DEFAULT_UA})
-            content = (resp.text or "")[:max_bytes]
-        except Exception:
-            continue
+        scoped.append(url)
 
-        for name, pattern, severity, group_idx in PATTERNS:
-            for m in pattern.finditer(content):
-                value = m.group(group_idx) if group_idx else m.group(0)
-                if _is_placeholder(value):
-                    continue
-                masked = _mask(value)
-                key = (name, masked)
-                if key in seen_secrets:
-                    continue
-                seen_secrets.add(key)
-                findings.append(_finding(url, name, masked, severity))
-
-        for m in _GENERIC_RE.finditer(content):
-            keyword, value = m.group(1), m.group(2)
-            if _is_placeholder(value):
-                continue
-            masked = _mask(value)
-            key = ("generic:" + keyword.lower(), masked)
-            if key in seen_secrets:
-                continue
-            seen_secrets.add(key)
-            findings.append(_finding(url, f"Olası {keyword} (bağlamsal, servis-özel değil)",
-                                     masked, "medium"))
+    # İndirme paralel; tarama+dedup sonra sıralı
+    from .probe import parallel_collect
+    fetched = parallel_collect(lambda u: _fetch_one(u, timeout, max_bytes), scoped, concurrency)
+    findings: List[Dict[str, Any]] = []
+    seen_secrets: set = set()
+    for url, content in fetched:
+        _scan_content(url, content, seen_secrets, findings)
     return findings

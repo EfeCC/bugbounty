@@ -50,7 +50,8 @@ class WebRecon:
                  timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None,
                  ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
                  ffuf_codes: str = "200,204,301,302,307,401,403,405,500",
-                 secrets_max_files: int = 40, apischema_max_hosts: int = 15):
+                 secrets_max_files: int = 40, apischema_max_hosts: int = 15,
+                 probe_timeout: int = 8, probe_concurrency: int = 20):
         self.passive_only = passive_only
         self.rate_limit = rate_limit
         self.concurrency = concurrency
@@ -63,6 +64,10 @@ class WebRecon:
         self.ffuf_codes = ffuf_codes
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
+        # Per-host prob (git/cors/secret/apischema): KISA istek-timeout'u (self.timeout=600
+        # DEĞİL) + paralel çalışma → çok subdomain'de dakikalarca donma yerine saniyeler.
+        self.probe_timeout = probe_timeout
+        self.probe_concurrency = probe_concurrency
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "WebRecon":
@@ -80,6 +85,8 @@ class WebRecon:
             ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
+            probe_timeout=int(wc.get("probe_timeout", 8)),
+            probe_concurrency=int(wc.get("probe_concurrency", 20)),
         )
 
     def _find_wordlist(self) -> str:
@@ -324,8 +331,9 @@ class WebRecon:
         # URL string'ine bakan pasif tespitinden farklı olarak içeriği doğrular).
         if self._stage_on("gitcheck"):
             with reporter.stage("Git deposu ifşası kontrolü (/.git/HEAD)"):
-                git_findings = git_check.check(live_urls, timeout=self.timeout,
-                                               scope_checker=_in_scope)
+                git_findings = git_check.check(
+                    live_urls, timeout=self.probe_timeout,
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
                 findings.extend(git_findings)
             stages_run.append("gitcheck")
             if git_findings:
@@ -338,8 +346,9 @@ class WebRecon:
         # ── 3c. CORS yanlış yapılandırma kontrolü ────────────────────
         if self._stage_on("cors"):
             with reporter.stage("CORS yanlış yapılandırma kontrolü"):
-                cors_findings = cors_check.check(live_urls, timeout=self.timeout,
-                                                 scope_checker=_in_scope)
+                cors_findings = cors_check.check(
+                    live_urls, timeout=self.probe_timeout,
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
                 findings.extend(cors_findings)
             stages_run.append("cors")
             if cors_findings:
@@ -418,7 +427,8 @@ class WebRecon:
         if self._stage_on("secrets"):
             with reporter.stage("Secret/API-key taraması (JS dosyaları)"):
                 secret_findings = secrets_scan.scan(
-                    urls, max_files=self.secrets_max_files, scope_checker=_in_scope)
+                    urls, max_files=self.secrets_max_files, timeout=self.probe_timeout,
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
                 findings.extend(secret_findings)
             stages_run.append("secrets")
             if secret_findings:
@@ -439,7 +449,8 @@ class WebRecon:
             with reporter.stage("API şema keşfi (Swagger/OpenAPI)"):
                 api_targets = api_schema.discover(
                     live_urls, urls, max_hosts=self.apischema_max_hosts,
-                    timeout=self.timeout, scope_checker=_in_scope)
+                    timeout=self.probe_timeout, concurrency=self.probe_concurrency,
+                    scope_checker=_in_scope)
                 if api_targets:
                     self._write_json(os.path.join(output_dir, "api_schema_targets.json"),
                                      api_targets)

@@ -36,7 +36,11 @@ webrecon:
   concurrency: 25              # httpx/gau/ffuf paralel thread (sınırlı VM için düşür: 10)
   nuclei_severity: "low,medium,high,critical"
   max_urls: 3000
-  timeout: 600
+  timeout: 600                 # subfinder/nuclei gibi TÜM tarama için üst sınır (per-istek DEĞİL)
+  # Per-host kontroller (git/cors/secret/apischema) — çok subdomain'de tek tek dakikalarca
+  # donmayı önler: KISA istek-timeout'u + paralel çalışma.
+  probe_timeout: 8             # tek bir per-host isteğin zaman aşımı (sn) — 600 değil!
+  probe_concurrency: 20        # aynı anda kaç host kontrol edilsin (sınırlı VM/nazik için düşür: 5)
   # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets/apischema) hepsi
   # pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
   #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false, apischema: false}

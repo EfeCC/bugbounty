@@ -57,62 +57,79 @@ def _finding(base_url: str, mode: str, acao: str, creds: bool) -> Dict[str, Any]
     }
 
 
-def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 10,
+def _check_one(base_url: str, timeout: int) -> List[Dict[str, Any]]:
+    """Tek host'ta CORS kontrolü (2 istek: sahte origin + null) — paralel çağrılır.
+    Session worker-başına (thread-safe). Kendi exception'ını yutar."""
+    import requests
+    session = requests.Session()
+    base = base_url.rstrip("/")
+    found: List[Dict[str, Any]] = []
+
+    # Test 1: rastgele/sahte origin yansıtılıyor mu?
+    fake_origin = _random_origin()
+    try:
+        resp = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
+                           headers={"User-Agent": _DEFAULT_UA, "Origin": fake_origin})
+        acao = resp.headers.get("Access-Control-Allow-Origin", "")
+        if acao == fake_origin:
+            creds = resp.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
+            found.append(_finding(base, "rastgele", acao, creds))
+    except Exception:
+        pass
+
+    # Test 2: null origin whitelist'te mi?
+    try:
+        resp2 = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
+                            headers={"User-Agent": _DEFAULT_UA, "Origin": "null"})
+        acao2 = resp2.headers.get("Access-Control-Allow-Origin", "")
+        if acao2 == "null":
+            creds2 = resp2.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
+            found.append(_finding(base, "null", acao2, creds2))
+    except Exception:
+        pass
+    return found
+
+
+def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
+         concurrency: int = 20,
          scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
     """Her canlı host'a sahte bir Origin ile istek atar, yansıma + credentials
-    kombinasyonunu kontrol eder. `requests` kurulu değilse boş liste döner."""
-    findings: List[Dict[str, Any]] = []
+    kombinasyonunu kontrol eder. Host'lar PARALEL kontrol edilir. `requests` kurulu
+    değilse boş liste döner (graceful-degrade)."""
     if not live_hosts:
-        return findings
+        return []
     try:
-        import requests
+        import requests  # noqa: F401
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except ImportError:
             pass
     except ImportError:
-        return findings
+        return []
 
-    session = requests.Session()
-    checked = set()
-    count = 0
+    targets = _scoped_targets(live_hosts, max_hosts, scope_checker)
+    from .probe import parallel_collect
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+
+
+def _scoped_targets(live_hosts: List[str], max_hosts: int,
+                    scope_checker: Optional[Callable[[str], bool]]) -> List[str]:
+    """Host-bazlı dedup + scope-gate + cap (kapsam-dışı host paralel katmana gitmez)."""
+    out: List[str] = []
+    seen = set()
     for base_url in live_hosts:
-        if count >= max_hosts:
+        if len(out) >= max_hosts:
             break
         host = urlparse(base_url).hostname or ""
-        if not host or host in checked:
+        if not host or host in seen:
             continue
-        checked.add(host)
+        seen.add(host)
         if scope_checker:
             try:
                 if not scope_checker(host):
                     continue
             except Exception:
                 continue
-        count += 1
-        base = base_url.rstrip("/")
-
-        # Test 1: rastgele/sahte origin yansıtılıyor mu?
-        fake_origin = _random_origin()
-        try:
-            resp = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
-                               headers={"User-Agent": _DEFAULT_UA, "Origin": fake_origin})
-            acao = resp.headers.get("Access-Control-Allow-Origin", "")
-            if acao == fake_origin:
-                creds = resp.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
-                findings.append(_finding(base, "rastgele", acao, creds))
-        except Exception:
-            pass
-
-        # Test 2: null origin whitelist'te mi?
-        try:
-            resp2 = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
-                                headers={"User-Agent": _DEFAULT_UA, "Origin": "null"})
-            acao2 = resp2.headers.get("Access-Control-Allow-Origin", "")
-            if acao2 == "null":
-                creds2 = resp2.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
-                findings.append(_finding(base, "null", acao2, creds2))
-        except Exception:
-            pass
-    return findings
+        out.append(base_url)
+    return out

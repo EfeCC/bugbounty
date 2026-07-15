@@ -126,14 +126,30 @@ def _extract_targets(schema: Dict[str, Any], base_url: str) -> List[Dict[str, An
     return targets
 
 
-def discover(live_hosts: List[str], urls: List[str], max_hosts: int = 15, timeout: int = 10,
+def _fetch_one(url: str, timeout: int):
+    """Tek aday şema URL'ini indirir — paralel çağrılır. 200 ise [(url, metin)], değilse
+    []. Session worker-başına (thread-safe). Kendi exception'ını yutar."""
+    import requests
+    try:
+        resp = requests.Session().get(url, timeout=timeout, verify=False,
+                                      headers={"User-Agent": _DEFAULT_UA})
+        if resp.status_code != 200:
+            return []
+        return [(url, resp.text or "")]
+    except Exception:
+        return []
+
+
+def discover(live_hosts: List[str], urls: List[str], max_hosts: int = 15, timeout: int = 8,
+            concurrency: int = 20,
             scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
     """Bilinen konumlarda + keşfedilen URL'ler arasında swagger/openapi şema dosyası
     arar; bulursa indirip ayrıştırır, fuzzer hedef listesi (query+body parametreli)
-    döner. `requests` kurulu değilse boş liste döner (graceful-degrade)."""
+    döner. İNDİRME paralel, ayrıştırma sıralı (fingerprint dedup deterministik). `requests`
+    kurulu değilse boş liste döner (graceful-degrade)."""
     targets: List[Dict[str, Any]] = []
     try:
-        import requests
+        import requests  # noqa: F401
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -156,8 +172,8 @@ def discover(live_hosts: List[str], urls: List[str], max_hosts: int = 15, timeou
         for p in _COMMON_PATHS:
             candidates.append(base + p)
 
-    session = requests.Session()
-    seen_docs = set()  # aynı şemayı birden fazla konumda bulursak tekrar parse etme
+    # scope-gate (kapsam-dışı aday indirilmez)
+    scoped = []
     for url in candidates:
         host = urlparse(url).hostname or ""
         if scope_checker:
@@ -166,14 +182,13 @@ def discover(live_hosts: List[str], urls: List[str], max_hosts: int = 15, timeou
                     continue
             except Exception:
                 continue
-        try:
-            resp = session.get(url, timeout=timeout, verify=False,
-                               headers={"User-Agent": _DEFAULT_UA})
-            if resp.status_code != 200:
-                continue
-            text = resp.text or ""
-        except Exception:
-            continue
+        scoped.append(url)
+
+    # İndirme paralel; ayrıştırma+dedup sonra sıralı
+    from .probe import parallel_collect
+    fetched = parallel_collect(lambda u: _fetch_one(u, timeout), scoped, concurrency)
+    seen_docs = set()  # aynı şemayı birden fazla konumda bulursak tekrar parse etme
+    for url, text in fetched:
         try:
             doc = json.loads(text)
         except ValueError:
@@ -188,6 +203,7 @@ def discover(live_hosts: List[str], urls: List[str], max_hosts: int = 15, timeou
         if fingerprint in seen_docs:
             continue
         seen_docs.add(fingerprint)
+        host = urlparse(url).hostname or ""
         base_url = f"{urlparse(url).scheme}://{host}"
         targets.extend(_extract_targets(doc, base_url))
     return targets

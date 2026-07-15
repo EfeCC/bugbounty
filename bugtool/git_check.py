@@ -53,50 +53,68 @@ def _finding(base_url: str) -> Dict[str, Any]:
     }
 
 
-def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 10,
+def _check_one(base_url: str, timeout: int) -> List[Dict[str, Any]]:
+    """Tek host'ta `/.git/HEAD` kontrolü — thread havuzunda paralel çağrılır. Kendi
+    exception'ını yutup boş liste döner (bir prob patlarsa tarama sürsün). Session
+    worker-başına oluşturulur (thread-safe)."""
+    import requests
+    base = base_url.rstrip("/")
+    try:
+        resp = requests.Session().get(f"{base}/.git/HEAD", timeout=timeout, verify=False,
+                                      headers={"User-Agent": _DEFAULT_UA}, allow_redirects=False)
+    except Exception:
+        return []
+    ctype = (resp.headers.get("content-type") or "").lower()
+    # content-type html içeriyorsa muhtemelen bir 200-döndüren özel hata sayfasıdır
+    # (SPA yönlendirmesi vb.) — gerçek .git/HEAD asla html olmaz, ek FP koruması.
+    if resp.status_code == 200 and "html" not in ctype and _looks_like_git_head(resp.text or ""):
+        return [_finding(base)]
+    return []
+
+
+def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
+         concurrency: int = 20,
          scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
     """Her canlı host için `/.git/HEAD`'i indirir, içerik gerçekten bir git HEAD
-    dosyasına benziyorsa bulgu üretir. `requests` kurulu değilse ya da hiç canlı
-    host yoksa boş liste döner (graceful-degrade)."""
-    findings: List[Dict[str, Any]] = []
+    dosyasına benziyorsa bulgu üretir. Host'lar PARALEL kontrol edilir (çok subdomain'de
+    saniyeler içinde biter, tek tek dakikalarca değil). `requests` kurulu değilse ya da
+    hiç canlı host yoksa boş liste döner (graceful-degrade)."""
     if not live_hosts:
-        return findings
+        return []
     try:
-        import requests
+        import requests  # noqa: F401
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except ImportError:
             pass
     except ImportError:
-        return findings
+        return []
 
-    session = requests.Session()
-    checked_hosts = set()
-    count = 0
+    # Hedef listesini önce hazırla (scope-gate + host-dedup + cap) — sıralı, ağsız, ucuz.
+    # Kapsam-dışı host'lar paralel katmana HİÇ gönderilmez.
+    targets = _scoped_targets(live_hosts, max_hosts, scope_checker)
+    from .probe import parallel_collect
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+
+
+def _scoped_targets(live_hosts: List[str], max_hosts: int,
+                    scope_checker: Optional[Callable[[str], bool]]) -> List[str]:
+    """Host-bazlı dedup + scope-gate + cap uygulanmış hedef URL listesi."""
+    out: List[str] = []
+    seen = set()
     for base_url in live_hosts:
-        if count >= max_hosts:
+        if len(out) >= max_hosts:
             break
         host = urlparse(base_url).hostname or ""
-        if not host or host in checked_hosts:
+        if not host or host in seen:
             continue
-        checked_hosts.add(host)
+        seen.add(host)
         if scope_checker:
             try:
                 if not scope_checker(host):
                     continue
             except Exception:
                 continue
-        count += 1
-        base = base_url.rstrip("/")
-        try:
-            resp = session.get(f"{base}/.git/HEAD", timeout=timeout, verify=False,
-                               headers={"User-Agent": _DEFAULT_UA}, allow_redirects=False)
-        except Exception:
-            continue
-        ctype = (resp.headers.get("content-type") or "").lower()
-        # content-type html içeriyorsa muhtemelen bir 200-döndüren özel hata sayfasıdır
-        # (SPA yönlendirmesi vb.) — gerçek .git/HEAD asla html olmaz, ek FP koruması.
-        if resp.status_code == 200 and "html" not in ctype and _looks_like_git_head(resp.text or ""):
-            findings.append(_finding(base))
-    return findings
+        out.append(base_url)
+    return out
