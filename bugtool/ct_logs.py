@@ -18,6 +18,18 @@ import json
 from typing import List
 
 
+def requests_available() -> bool:
+    """`requests` kurulu mu? DÜZELTME: eskiden crt.sh'den sonuç gelmeyince ("gerçekten
+    boş sonuç" ile "'requests' hiç kurulu değil") tek, belirsiz bir mesaj basılıyordu
+    ("requests kurulu değil OLABİLİR"). Çağıran taraf (webrecon.py) artık bu fonksiyonla
+    gerçek sebebi ayırt edip doğru mesajı basabilir."""
+    try:
+        import requests  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def fetch_subdomains(domain: str, timeout: int = 30) -> List[str]:
     """crt.sh'den `domain` için bilinen tüm subdomain adaylarını çeker (geçmiş/güncel
     sertifika kayıtlarından). Wildcard (*.) önekleri temizlenir, sonuç sıralı/dedup'lı

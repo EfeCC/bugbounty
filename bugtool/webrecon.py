@@ -134,6 +134,30 @@ class WebRecon:
         return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
 
     @staticmethod
+    def _probe_scheme(host: str, timeout: int = 5) -> str:
+        """httpx hiç sonuç vermediğinde yedek yöntem: `requests` varsa host'un gerçekten
+        hangi protokolle konuştuğu hafifçe (HEAD) denenir; `requests` yoksa ya da ikisi
+        de başarısız olursa eski davranışla (https varsay) aynı sonuca döner — regresyon
+        yok, sadece-HTTP hedefte artık doğru protokol bulunur."""
+        try:
+            import requests
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except ImportError:
+                pass
+        except ImportError:
+            return "https"
+        for scheme in ("https", "http"):
+            try:
+                requests.head(f"{scheme}://{host}", timeout=timeout, verify=False,
+                              allow_redirects=True)
+                return scheme
+            except Exception:
+                continue
+        return "https"
+
+    @staticmethod
     def _warn_if_failed(reporter: Any, r: Optional[Dict[str, Any]], label: str):
         """Bir `shell.run()` sonucunu kontrol eder: binary çalıştı ama hata verdiyse
         (boş stdout + başarısız dönüş) reporter üzerinden görünür kılar. Eskiden bu
@@ -203,7 +227,15 @@ class WebRecon:
                 reporter.done(f"{len(ct_subs)} subdomain (crt.sh) — {new_count} tanesi yeni")
             else:
                 stages_skipped.append("ctlogs")
-                reporter.skip("crt.sh: sonuç yok/erişilemedi (requests kurulu değil olabilir) — atlandı")
+                # DÜZELTME: eskiden requests kurulu olsa bile aynı belirsiz mesaj
+                # basılıyordu, kullanıcı yanlış sebebe yöneliyordu (gerçek sebep genelde
+                # hedefin hiç TLS sertifikası olmaması ya da ağ sorunu). Artık gerçek
+                # sebep ayırt ediliyor.
+                if not ct_logs.requests_available():
+                    reporter.skip("crt.sh: 'requests' kütüphanesi kurulu değil — atlandı")
+                else:
+                    reporter.skip("crt.sh: sertifika kaydı bulunamadı (ağ sorunu ya da "
+                                  "hedefin hiç TLS/HTTPS kullanmaması normal bir sebep olabilir)")
         else:
             stages_skipped.append("ctlogs")
 
@@ -272,7 +304,15 @@ class WebRecon:
             reporter.skip("HTTP probe (httpx) kurulu değil — atlandı")
         live_urls = [h["url"] for h in live_hosts if h.get("url")]
         if not live_urls:
-            live_urls = [f"https://{h}" for h in resolved[:50]]
+            # DÜZELTME: httpx hiç sonuç vermediğinde eskiden körlemesine 'https'
+            # varsayılıyordu — sadece-HTTP servis eden bir hedefte bu yanlış tahmin
+            # sonraki aşamaların (ffuf/git-check/cors-check) hiç bağlanamadan sessizce
+            # "0 bulgu" göstermesine yol açabiliyordu (temiz mi, hiç bağlanamadı mı
+            # ayırt edilemiyordu). `requests` varsa host başına gerçek protokol
+            # hafifçe (HEAD) denenir; ikisi de başarısız olursa eski davranışla
+            # (https varsay) aynı sonuca düşülür — regresyon yok.
+            reporter.info("httpx sonuç vermedi — host başına http/https deneniyor (yedek yöntem)…")
+            live_urls = [f"{self._probe_scheme(h)}://{h}" for h in resolved[:50]]
         live_file = os.path.join(output_dir, "livehosts.txt")
         self._write_lines(live_file, live_urls)
 

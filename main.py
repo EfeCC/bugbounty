@@ -280,7 +280,14 @@ def monitor(scope, passive, diff_only, notify):
         webhook_url = mcfg.get("webhook_url")
         if webhook_url:
             console.print("[dim]  📡 Yeni asset'ler webhook'a bildiriliyor…[/dim]")
-            mon.notify_webhook(delta, webhook_url, mcfg.get("webhook_format", "generic"))
+            result = mon.notify_webhook(delta, webhook_url, mcfg.get("webhook_format", "generic"))
+            if result.get("success"):
+                console.print("[green]  ✅ Webhook bildirimi gönderildi.[/green]")
+            else:
+                # DÜZELTME: eskiden bu dönüş değeri hiç kontrol edilmiyordu — webhook
+                # başarısız olsa bile kullanıcı hiçbir şey görmüyordu.
+                reason = result.get("error") or f"HTTP {result.get('status_code', '?')}"
+                console.print(f"[bold red]  ❌ Webhook bildirimi BAŞARISIZ: {reason}[/bold red]")
         else:
             console.print("[yellow]  ⚠ --notify verildi ama config.yaml → monitor.webhook_url boş.[/yellow]")
 

@@ -76,6 +76,23 @@ def test_ct_logs_graceful_on_error(monkeypatch):
     assert ct_logs.fetch_subdomains("example.com") == []
 
 
+def test_ct_logs_requests_available():
+    # requests bu test ortamında kurulu → True
+    assert ct_logs.requests_available() is True
+
+
+def test_ct_logs_requests_unavailable(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def blocked(name, *a, **kw):
+        if name == "requests":
+            raise ImportError("yok")
+        return real_import(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert ct_logs.requests_available() is False
+
+
 # ── secrets_scan ─────────────────────────────────────────────────────────────
 def test_secrets_scan_finds_aws_key(monkeypatch):
     _patch_session_get(monkeypatch,

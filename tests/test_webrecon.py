@@ -61,6 +61,10 @@ def _patch(monkeypatch, have=True):
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
+    # _probe_scheme (httpx boş sonuç yedek yöntemi) gerçek ağa çıkmasın — varsayılan
+    # olarak "https" başarılı gibi davran (eski davranışla aynı sonuç, testler bozulmaz)
+    import requests as _requests
+    monkeypatch.setattr(_requests, "head", lambda url, **kw: None)
 
 
 def test_pipeline_full(monkeypatch, tmp_path):
@@ -169,3 +173,126 @@ def test_dedup_scope_urls():
     urls = ["https://a.example.com/1", "https://a.example.com/1", "https://out.com/2"]
     out = wr._dedup_scope_urls(urls, lambda h: h.endswith("example.com"))
     assert out == ["https://a.example.com/1"]
+
+
+# ── _probe_scheme (httpx boş sonuç yedek yöntemi) ───────────────────────────
+def test_probe_scheme_prefers_https_when_both_work(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "head", lambda url, **kw: None)
+    assert WebRecon._probe_scheme("example.com") == "https"
+
+
+def test_probe_scheme_falls_back_to_http_only(monkeypatch):
+    import requests
+
+    def fake_head(url, **kw):
+        if url.startswith("https://"):
+            raise requests.exceptions.SSLError("no TLS")
+        return None
+    monkeypatch.setattr(requests, "head", fake_head)
+    assert WebRecon._probe_scheme("http-only.example.com") == "http"
+
+
+def test_probe_scheme_both_fail_defaults_https(monkeypatch):
+    import requests
+
+    def always_fail(url, **kw):
+        raise requests.exceptions.ConnectionError("unreachable")
+    monkeypatch.setattr(requests, "head", always_fail)
+    # Regresyon-güvenli: ikisi de başarısızsa eski davranışla aynı sonuca (https) düş
+    assert WebRecon._probe_scheme("dead.example.com") == "https"
+
+
+def test_probe_scheme_no_requests_defaults_https(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def blocked_import(name, *a, **kw):
+        if name == "requests":
+            raise ImportError("no requests")
+        return real_import(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    assert WebRecon._probe_scheme("example.com") == "https"
+
+
+# ── ctlogs mesaj netliği (requests-yok vs sonuç-yok ayrımı) ─────────────────
+def test_ctlogs_message_distinguishes_no_requests(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    monkeypatch.setattr(webrecon_mod.ct_logs, "fetch_subdomains", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.ct_logs, "requests_available", lambda: False)
+    events = []
+
+    class Rec:
+        def stage(self, label):
+            import contextlib
+            return contextlib.nullcontext()
+
+        def done(self, msg, path=None):
+            events.append(("done", msg))
+
+        def skip(self, msg):
+            events.append(("skip", msg))
+
+        def info(self, msg):
+            pass
+
+        def error(self, msg):
+            pass
+
+    wr = WebRecon()
+    wr.run_pipeline("example.com", output_dir=str(tmp_path), reporter=Rec())
+    assert any("requests" in m and "kurulu değil" in m for k, m in events if k == "skip")
+
+
+def test_ctlogs_message_when_requests_available_but_empty(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    monkeypatch.setattr(webrecon_mod.ct_logs, "fetch_subdomains", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.ct_logs, "requests_available", lambda: True)
+    events = []
+
+    class Rec:
+        def stage(self, label):
+            import contextlib
+            return contextlib.nullcontext()
+
+        def done(self, msg, path=None):
+            events.append(("done", msg))
+
+        def skip(self, msg):
+            events.append(("skip", msg))
+
+        def info(self, msg):
+            pass
+
+        def error(self, msg):
+            pass
+
+    wr = WebRecon()
+    wr.run_pipeline("example.com", output_dir=str(tmp_path), reporter=Rec())
+    assert any("sertifika kaydı bulunamadı" in m for k, m in events if k == "skip")
+    assert not any("kurulu değil" in m for k, m in events if k == "skip" and "crt.sh" in m)
+
+
+def test_webrecon_uses_probe_scheme_when_httpx_empty(monkeypatch, tmp_path):
+    # httpx kurulu AMA boş çıktı verdi (0 host) → yedek yöntem devreye girip gerçek
+    # protokolü (http-only hedef) bulmalı, körlemesine https yazmamalı.
+    _patch(monkeypatch)
+
+    def fake_run(cmd, timeout=300, **kw):
+        if "httpx" in cmd.lower():
+            return {"success": True, "stdout": "", "stderr": "", "command": cmd}
+        if "subfinder" in cmd.lower() or "dnsx" in cmd.lower():
+            return {"success": True, "stdout": SUBS, "stderr": "", "command": cmd}
+        return {"success": True, "stdout": "", "stderr": "", "command": cmd}
+
+    monkeypatch.setattr(webrecon_mod, "run", fake_run)
+    import requests
+    monkeypatch.setattr(requests, "head",
+                        lambda url, **kw: (_ for _ in ()).throw(Exception("no https"))
+                        if url.startswith("https://") else None)
+
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    with open(f"{tmp_path}/livehosts.txt", encoding="utf-8") as f:
+        content = f.read()
+    assert "http://" in content and "https://" not in content
