@@ -51,6 +51,8 @@ class WebRecon:
                  ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
                  ffuf_codes: str = "200,204,301,302,307,401,403,405,500",
                  ffuf_timeout: int = 120,
+                 katana_max_hosts: int = 15, katana_crawl_duration: int = 300,
+                 nuclei_timeout: int = 1200,
                  secrets_max_files: int = 40, apischema_max_hosts: int = 15,
                  probe_timeout: int = 8, probe_concurrency: int = 20):
         self.passive_only = passive_only
@@ -64,6 +66,9 @@ class WebRecon:
         self.ffuf_max_hosts = ffuf_max_hosts
         self.ffuf_codes = ffuf_codes
         self.ffuf_timeout = ffuf_timeout
+        self.katana_max_hosts = katana_max_hosts
+        self.katana_crawl_duration = katana_crawl_duration
+        self.nuclei_timeout = nuclei_timeout
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
         # Per-host prob (git/cors/secret/apischema): KISA istek-timeout'u (self.timeout=600
@@ -86,6 +91,9 @@ class WebRecon:
             ffuf_max_hosts=int(wc.get("ffuf_max_hosts", 10)),
             ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
             ffuf_timeout=int(wc.get("ffuf_timeout", 120)),
+            katana_max_hosts=int(wc.get("katana_max_hosts", 15)),
+            katana_crawl_duration=int(wc.get("katana_crawl_duration", 300)),
+            nuclei_timeout=int(wc.get("nuclei_timeout", 1200)),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
             probe_timeout=int(wc.get("probe_timeout", 8)),
@@ -96,10 +104,13 @@ class WebRecon:
         """ffuf wordlist yolunu bulur: config'teki, yoksa yaygın SecLists konumları."""
         if self.ffuf_wordlist and os.path.exists(self.ffuf_wordlist):
             return self.ffuf_wordlist
+        # DÜZELTME: raft-small-words.txt ~43.000 kelime → 50 req/s ile host başına ~860sn!
+        # common.txt ~4.600 kelime → 100 req/s ile ~46sn → timeout'a sığar.
+        # Öncelik: küçük → büyük wordlist (eskiden büyük önce deneniyor, timeout patıyordu).
         for cand in (
-            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
             "/usr/share/seclists/Discovery/Web-Content/common.txt",
             "/usr/share/wordlists/dirb/common.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
             "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
         ):
             if os.path.exists(cand):
@@ -116,8 +127,13 @@ class WebRecon:
         base = host.rstrip("/")
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("_") or "host"
         out_json = os.path.join(output_dir, f"ffuf_{safe_name}.json")
+        # -maxtime: ffuf'un kendisini kesmesi (graceful stop → JSON dosyası oluşur)
+        # -maxtime-job: her host-path denemesi için max süre
+        # Subprocess timeout = maxtime + 15sn tampon (ffuf'un JSON'ı yazması için)
+        maxtime = max(30, timeout - 15)
         cmd = (f"ffuf -u {base}/FUZZ -w {wordlist} -mc {self.ffuf_codes} "
                f"-ac -s -t {self.concurrency} -rate {self.rate_limit} -timeout 10 "
+               f"-maxtime {maxtime} "
                f"-o {out_json} -of json")
         run(cmd, timeout=timeout)
         hits: List[str] = []
@@ -365,8 +381,24 @@ class WebRecon:
         # ── 4. URL/endpoint hasadı (katana aktif + gau pasif) ───────
         urls: List[str] = []
         if not self.passive_only and self._stage_on("katana") and have("katana"):
-            with reporter.stage("URL/endpoint toplanıyor (katana — aktif crawl)"):
-                r = run(f"katana -list {live_file} -silent -jc -d 2", timeout=self.timeout)
+            # DÜZELTME: Eskiden katana TÜM canlı host'ları sınırsız crawl ediyordu →
+            # trip.com gibi büyük hedeflerde 600sn timeout patıyordu. Şimdi:
+            #   - Host sayısı katana_max_hosts ile sınırlı
+            #   - -crawl-duration ile toplam süre kısıtlı (varsayılan 5dk)
+            #   - -rl ve -c ile rate/concurrency kontrollü
+            #   - subprocess timeout = crawl_duration + 30sn tampon
+            katana_hosts = live_urls[:self.katana_max_hosts]
+            katana_file = os.path.join(output_dir, "katana_targets.txt")
+            self._write_lines(katana_file, katana_hosts)
+            crawl_dur = self.katana_crawl_duration
+            reporter.info(f"Katana: {len(katana_hosts)} host (max {self.katana_max_hosts}), "
+                          f"süre limiti {crawl_dur}sn")
+            with reporter.stage(f"URL/endpoint toplanıyor (katana — {len(katana_hosts)} host, max {crawl_dur}sn)"):
+                cmd = (f"katana -list {katana_file} -silent -jc -d 3 "
+                       f"-crawl-duration {crawl_dur}s "
+                       f"-rl {self.rate_limit} -c {self.concurrency} "
+                       f"-timeout 10")
+                r = run(cmd, timeout=crawl_dur + 30)
                 urls.extend(self._lines(r["stdout"]))
             self._warn_if_failed(reporter, r, "katana")
             stages_run.append("katana")
@@ -478,10 +510,16 @@ class WebRecon:
         # NOT: `findings` fonksiyonun başında başlatıldı (subdomain-takeover da aynı
         # listeye ekliyor) — burada sıfırlanmıyor, üzerine ekleniyor (extend).
         if self._stage_on("nuclei") and live_urls and have("nuclei"):
-            with reporter.stage(f"Zafiyet taraması (nuclei, {len(live_urls)} host)"):
+            # DÜZELTME: nuclei artık kendi timeout'unu kullanıyor (varsayılan 1200sn = 20dk).
+            # Eskiden global 600sn timeout kullanılıyordu → büyük hedeflerde patıyordu.
+            # -c: paralel template çalıştırma, -timeout: per-istek zaman aşımı (sn).
+            reporter.info(f"Nuclei: {len(live_urls)} host, max süre {self.nuclei_timeout}sn "
+                          f"({self.nuclei_timeout // 60} dk)")
+            with reporter.stage(f"Zafiyet taraması (nuclei, {len(live_urls)} host, "
+                                f"max {self.nuclei_timeout // 60}dk)"):
                 cmd = (f"nuclei -l {live_file} -jsonl -silent -severity {self.nuclei_severity} "
-                       f"-rl {self.rate_limit}")
-                r = run(cmd, timeout=self.timeout)
+                       f"-rl {self.rate_limit} -c {self.concurrency} -timeout 10")
+                r = run(cmd, timeout=self.nuclei_timeout)
                 self._write_raw(os.path.join(output_dir, "nuclei.jsonl"), r["stdout"])
                 nuclei_findings = self._parse_nuclei(r["stdout"])
                 findings.extend(nuclei_findings)

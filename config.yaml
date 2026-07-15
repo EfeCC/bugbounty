@@ -57,10 +57,15 @@ webrecon:
   apischema_max_hosts: 15      # kaç canlı host'ta şema dosyası aransın (patlamayı önler)
   # İçerik keşfi / dizin brute (ffuf) — linklenmemiş /admin, /.git, /backup yollarını bulur
   ffuf_wordlist: ""            # boşsa yaygın SecLists/dirb konumları otomatik denenir
+                               # NOT: common.txt (~4600 kelime) önce denenir, raft-small (~43K) son seçenek
   ffuf_max_hosts: 10           # kaç canlı host'ta ffuf koşulsun (patlamayı önler)
   ffuf_codes: "200,204,301,302,307,401,403,405,500"
-  ffuf_timeout: 120              # host başına ffuf zaman aşımı (sn); eskiden global timeout=600 kullanılıyordu
-                                 # → 8 host × 600 = 4800sn bekleme! Şimdi host başına cap'leniyor.
+  ffuf_timeout: 120            # host başına ffuf zaman aşımı (sn)
+  # Aktif URL crawl (katana) — endpoint keşfi için web sayfalarını gezer
+  katana_max_hosts: 15         # kaç canlı host'ta katana koşulsun (eskiden sınırsız → timeout!)
+  katana_crawl_duration: 300   # toplam crawl süresi limiti (sn) — 5dk. Eskiden sınırsız + 600sn timeout'a sığmıyordu
+  # Zafiyet taraması (nuclei) — template tabanlı otomatik zaf. tespiti
+  nuclei_timeout: 1200         # nuclei için AYRI timeout (sn) — 20dk. Eskiden global 600sn → büyük hedeflerde patıyordu
 
 # ── Monitor (yeni-asset takibi) ────────────────────────────
 monitor:
