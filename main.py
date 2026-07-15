@@ -22,10 +22,12 @@ from bugtool.fuzzer import ParamFuzzer
 from bugtool.reporter import ConsoleReporter
 from bugtool.oob import OobManager, read_hit_tokens
 from bugtool.shell import set_binary_paths, detect_httpx_conflict
+from bugtool.preflight import check_dependencies
 
 console = Console()
 
 _CONFLICT_WARNED = False
+_PREFLIGHT_DONE = False
 
 
 def load_config() -> dict:
@@ -48,6 +50,13 @@ def load_config() -> dict:
         if warning:
             console.print(Panel(f"[bold yellow]{warning}[/bold yellow]",
                                 border_style="yellow", title="Binary Çakışması"))
+
+    # İlk çağrıda ön-uçuş bağımlılık kontrolü — pipeline başlamadan ÖNCE eksikleri gösterir.
+    # Eskiden binary yoksa ancak 600sn timeout'tan sonra anlaşılıyordu.
+    global _PREFLIGHT_DONE
+    if not _PREFLIGHT_DONE:
+        _PREFLIGHT_DONE = True
+        check_dependencies(cfg, console=console)
 
     return cfg
 
@@ -142,6 +151,7 @@ _MENU = [
     ("Monitor", "yeni/kaybolan asset takibi (baseline diff)"),
     ("Triage", "mevcut recon çıktısını analiz et (+ opsiyonel aktif test)"),
     ("OOB korelasyon", "collaborator callback'lerini gömülü problarla eşleştir"),
+    ("Bağımlılık kontrolü", "tüm araçların kurulu olup olmadığını kontrol et"),
 ]
 
 
@@ -199,6 +209,8 @@ def _interactive_menu(ctx):
                                   default="", show_default=False).strip()
                 hits = click.prompt("Callback token dosyası (hits)")
                 ctx.invoke(oob_correlate, session_dir=sd, hits_file=hits)
+            elif choice == 6:
+                ctx.invoke(check)
         except click.Abort:
             console.print("\n[yellow]İptal edildi, menüye dönülüyor.[/yellow]")
         except click.ClickException as e:
@@ -550,6 +562,19 @@ def oob_correlate(session_dir, hits_file):
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump({"findings": existing + confirmed}, f, indent=2, ensure_ascii=False)
     console.print(f"[dim]  Bulgulara eklendi: {out_file}[/dim]")
+
+
+@cli.command()
+def check():
+    """🔧 Bağımlılık kontrolü: tüm araçların kurulu olup olmadığını raporlar.
+
+    Pipeline başlamadan önce hangi araçların eksik olduğunu görmek için:
+        python main.py check
+    """
+    config = load_config()
+    # load_config() zaten preflight çalıştırıyor, ama burada _PREFLIGHT_DONE
+    # True olmuş olabilir (önceki çağrıdan). Tekrar çalıştır:
+    check_dependencies(config, console=console)
 
 
 if __name__ == "__main__":

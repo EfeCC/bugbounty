@@ -50,6 +50,7 @@ class WebRecon:
                  timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None,
                  ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
                  ffuf_codes: str = "200,204,301,302,307,401,403,405,500",
+                 ffuf_timeout: int = 120,
                  secrets_max_files: int = 40, apischema_max_hosts: int = 15,
                  probe_timeout: int = 8, probe_concurrency: int = 20):
         self.passive_only = passive_only
@@ -62,6 +63,7 @@ class WebRecon:
         self.ffuf_wordlist = ffuf_wordlist
         self.ffuf_max_hosts = ffuf_max_hosts
         self.ffuf_codes = ffuf_codes
+        self.ffuf_timeout = ffuf_timeout
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
         # Per-host prob (git/cors/secret/apischema): KISA istek-timeout'u (self.timeout=600
@@ -83,6 +85,7 @@ class WebRecon:
             ffuf_wordlist=str(wc.get("ffuf_wordlist", "") or ""),
             ffuf_max_hosts=int(wc.get("ffuf_max_hosts", 10)),
             ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
+            ffuf_timeout=int(wc.get("ffuf_timeout", 120)),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
             probe_timeout=int(wc.get("probe_timeout", 8)),
@@ -103,7 +106,8 @@ class WebRecon:
                 return cand
         return ""
 
-    def _ffuf_host(self, host: str, wordlist: str, output_dir: str) -> Tuple[List[str], bool]:
+    def _ffuf_host(self, host: str, wordlist: str, output_dir: str,
+                   timeout: int = 120) -> Tuple[List[str], bool]:
         """Tek host'ta ffuf içerik keşfi (dizin/dosya brute). `-o/-of json` ile
         yapılandırılmış sonuç alır (status code bilgisi korunur, stdout satırlarının
         URL mi path mi olduğunu tahmin etmeye gerek kalmaz). `-ac` (auto-calibrate)
@@ -115,7 +119,7 @@ class WebRecon:
         cmd = (f"ffuf -u {base}/FUZZ -w {wordlist} -mc {self.ffuf_codes} "
                f"-ac -s -t {self.concurrency} -rate {self.rate_limit} -timeout 10 "
                f"-o {out_json} -of json")
-        run(cmd, timeout=self.timeout)
+        run(cmd, timeout=timeout)
         hits: List[str] = []
         if not os.path.exists(out_json):
             return hits, False
@@ -394,12 +398,18 @@ class WebRecon:
                 hosts = hosts[: self.ffuf_max_hosts]
                 ffuf_hits: List[str] = []
                 ffuf_fail_count = 0
-                with reporter.stage(f"İçerik keşfi (ffuf, {len(hosts)} host × wordlist)"):
-                    for host in hosts:
-                        hits, ok = self._ffuf_host(host, wordlist, output_dir)
-                        ffuf_hits.extend(hits)
-                        if not ok:
-                            ffuf_fail_count += 1
+                # Per-host timeout: config'ten (ffuf_timeout) veya toplam timeout'ü
+                # host sayısına böl. Eskiden her host için 600sn timeout vardı → 8 host = 4800sn!
+                per_host_timeout = min(self.ffuf_timeout,
+                                       max(60, self.timeout // max(len(hosts), 1)))
+                reporter.info(f"İçerik keşfi: {len(hosts)} host, host başına max {per_host_timeout}sn")
+                for i, host in enumerate(hosts, 1):
+                    reporter.info(f"  ffuf [{i}/{len(hosts)}] {host[:80]}")
+                    hits, ok = self._ffuf_host(host, wordlist, output_dir,
+                                               timeout=per_host_timeout)
+                    ffuf_hits.extend(hits)
+                    if not ok:
+                        ffuf_fail_count += 1
                 urls.extend(ffuf_hits)
                 stages_run.append("ffuf")
                 reporter.done(f"{len(ffuf_hits)} gizli path/dosya (ffuf)")

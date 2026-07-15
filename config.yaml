@@ -32,15 +32,16 @@ scope:
 #           → secrets → nuclei. Binary/bağımlılık yoksa aşama SESSİZCE atlanır.
 webrecon:
   passive_only: false          # true = aktif crawl (katana) + ffuf kapalı; sadece pasif kaynaklar
-  rate_limit: 150              # httpx/nuclei/ffuf istek/sn üst sınırı (sınırlı VM için düşür: 50)
-  concurrency: 25              # httpx/gau/ffuf paralel thread (sınırlı VM için düşür: 10)
+  # DOS VDP: "avoid disruption to production systems" + DoS kesin yasak → NAZİK ayarlar.
+  rate_limit: 50                # httpx/nuclei/ffuf istek/sn üst sınırı (varsayılan 150'den düşürüldü)
+  concurrency: 10               # httpx/gau/ffuf paralel thread (varsayılan 25'ten düşürüldü)
   nuclei_severity: "low,medium,high,critical"
   max_urls: 3000
   timeout: 600                 # subfinder/nuclei gibi TÜM tarama için üst sınır (per-istek DEĞİL)
   # Per-host kontroller (git/cors/secret/apischema) — çok subdomain'de tek tek dakikalarca
   # donmayı önler: KISA istek-timeout'u + paralel çalışma.
   probe_timeout: 8             # tek bir per-host isteğin zaman aşımı (sn) — 600 değil!
-  probe_concurrency: 20        # aynı anda kaç host kontrol edilsin (sınırlı VM/nazik için düşür: 5)
+  probe_concurrency: 8         # aynı anda kaç host kontrol edilsin (DOS VDP için nazikleştirildi)
   # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets/apischema) hepsi
   # pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
   #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false, apischema: false}
@@ -57,6 +58,8 @@ webrecon:
   ffuf_wordlist: ""            # boşsa yaygın SecLists/dirb konumları otomatik denenir
   ffuf_max_hosts: 10           # kaç canlı host'ta ffuf koşulsun (patlamayı önler)
   ffuf_codes: "200,204,301,302,307,401,403,405,500"
+  ffuf_timeout: 120              # host başına ffuf zaman aşımı (sn); eskiden global timeout=600 kullanılıyordu
+                                 # → 8 host × 600 = 4800sn bekleme! Şimdi host başına cap'leniyor.
 
 # ── Monitor (yeni-asset takibi) ────────────────────────────
 monitor:
@@ -70,13 +73,15 @@ monitor:
 # Payload'lar bugtool/payloads.py'de (tek kaynak). Sonuçlar POTANSİYEL — manuel doğrula.
 fuzz:
   max_requests: 500            # oturum başına toplam istek üst sınırı (blast-radius)
-  delay: 0.0                   # istekler arası bekleme (sn) — hedefi yormamak/rate-limit için artır
+  delay: 0.3                   # DOS VDP: istekler arası bekleme (nazik olmak için 0'dan artırıldı)
   timeout: 10                  # istek zaman aşımı (sn)
   verify_tls: false            # self-signed sertifikalarda hata verme
   block_threshold: 8           # art arda bu kadar 403/429 gelince backoff (WAF/rate-limit) → dur
   test_all_if_no_hint: true    # true = ipucu olmayan param'da da TÜM sınıfları dene ("ne olursa");
                                # false = sadece xss/sqli/redirect (akıllı bütçe, sınırlı VM için)
-  classes: null                # null = tüm sınıflar; örn ["xss","sqli","lfi"] ile daralt
+  # DOS VDP: "Open redirect - unless additional security impact can be demonstrated" AÇIKÇA
+  # kapsam dışı → open_redirect sınıfını fuzz'dan çıkardık (boşuna bulgu/istek üretmesin).
+  classes: ["xss", "sqli", "lfi", "ssti", "ssrf", "crlf", "cmdi"]
   # Timing-ladder (doz-yanıt): zaman-tabanlı SQLi/CMDi'yi tek sleep yerine doz merdiveniyle
   # doğrular → ağ gürültüsü FP'sini eler, FIRED/INCONCLUSIVE/NOT_FIRED üretir.
   ladder_doses: [0, 2, 4, 6]   # sleep dozları (sn); yanıt süresi bunlarla doğrusal artmalı

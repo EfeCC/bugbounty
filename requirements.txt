@@ -1,13 +1,57 @@
 # ── bugtool — Python bağımlılıkları (pip) ──────────────────────────────────
 # Kurulum:  pip install -r requirements.txt
-#
-# NOT: Recon ARAÇLARI (subfinder / dnsx / httpx / katana / gau / nuclei / ffuf) pip
-# paketi DEĞİL — Go binary'leridir, ayrı kurulur:  ./scripts/install_dependencies.sh
-# (ya da Kali'de: sudo apt install subfinder dnsx nuclei ffuf katana httpx-toolkit)
-# Bunlar kurulu değilse ilgili aşama sessizce atlanır; araç yine çalışır (graceful-degrade).
 
 click>=8.1.0        # CLI + interaktif menü (prompt/confirm)
 rich>=13.0.0        # renkli konsol + spinner (canlı ilerleme)
 PyYAML>=6.0         # config.yaml okuma
 requests>=2.31.0    # aktif test (fuzzer) + yeni modüller (takeover/git/cors/secrets/oob) HTTP
                     # (urllib3 requests ile birlikte gelir; ayrıca gerekmez)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SİSTEM BAĞIMLILIKLARI — Go binary'leri (pip ile DEĞİL, ayrıca kurulur!)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Bu araçlar pip paketi değildir — Go ile derlenen komut-satırı binary'leridir.
+# Eksik olanları program başlangıcında otomatik raporlanır (python main.py check).
+#
+# ── Hızlı Kurulum (Kali/Debian/Ubuntu apt) ──────────────────────────────────
+#   sudo apt install -y subfinder dnsx nuclei ffuf katana httpx-toolkit seclists
+#
+# ── Go ile Kurulum (tüm platformlar) ────────────────────────────────────────
+#   # Önce Go kurulu olmalı: https://go.dev/doc/install
+#   # sonra PATH'e ekle: export PATH=$PATH:$(go env GOPATH)/bin
+#
+#   go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+#   go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+#   go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+#   go install github.com/projectdiscovery/katana/cmd/katana@latest
+#   go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+#   go install github.com/lc/gau/v2/cmd/gau@latest
+#   go install github.com/ffuf/ffuf/v2@latest
+#
+# ── Otomatik Kurulum Betiği ─────────────────────────────────────────────────
+#   chmod +x scripts/install_dependencies.sh
+#   ./scripts/install_dependencies.sh
+#
+# ── Araç Listesi ve Kullanım Yerleri ────────────────────────────────────────
+#   subfinder   → Subdomain enumerasyonu (KRİTİK)
+#   dnsx        → DNS çözümleme + subdomain takeover kontrolü
+#   httpx       → HTTP probe — canlı host tespiti (KRİTİK)
+#                 NOT: Kali'de Python httpx ile çakışabilir!
+#                 Çözüm: config.yaml → binaries.httpx: /root/go/bin/httpx
+#   katana      → Aktif URL crawl (link/JS endpoint keşfi)
+#   gau         → Pasif arşiv URL toplama (Wayback/OTX/CommonCrawl)
+#   nuclei      → Zafiyet taraması (template tabanlı) (KRİTİK)
+#   ffuf        → İçerik keşfi / dizin brute-force
+#                 NOT: Wordlist gerektirir! SecLists önerilir:
+#                 sudo apt install seclists
+#                 veya config.yaml → webrecon.ffuf_wordlist: /path/to/wordlist.txt
+#
+# ── Wordlist ────────────────────────────────────────────────────────────────
+#   ffuf için wordlist gerekir. Otomatik aranan konumlar:
+#     /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt
+#     /usr/share/seclists/Discovery/Web-Content/common.txt
+#     /usr/share/wordlists/dirb/common.txt
+#     /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt
+#   Kurulum: sudo apt install -y seclists
+# ═══════════════════════════════════════════════════════════════════════════════
