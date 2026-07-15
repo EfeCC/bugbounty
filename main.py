@@ -302,10 +302,11 @@ def _latest_reports_dir() -> str:
 
 
 def _render_triage(result: dict):
-    """Triyaj sonucunu (ilginç URL / tech / parametreli endpoint) konsola basar."""
+    """Triyaj sonucunu (ilginç URL / tech / parametreli endpoint / API şema) konsola basar."""
     s = result["stats"]
     console.print(f"[dim]  {s['urls']} URL · {s['param_endpoints']} parametreli endpoint · "
-                  f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti[/dim]")
+                  f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti · "
+                  f"{s.get('api_schema_endpoints', 0)} API şema endpoint'i[/dim]")
     if result["interesting_urls"]:
         console.print("\n[bold yellow]⚠️  İlginç / İfşa URL'ler:[/bold yellow]")
         for it in result["interesting_urls"][:40]:
@@ -320,6 +321,17 @@ def _render_triage(result: dict):
             for name, classes in pt["params"].items():
                 tag = ", ".join(classes) if classes else "genel"
                 console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
+    if result.get("api_schema_targets"):
+        body_count = sum(1 for t in result["api_schema_targets"] if t.get("body_params"))
+        console.print(f"\n[bold yellow]📋 API Şema Keşfi (Swagger/OpenAPI) — "
+                      f"{len(result['api_schema_targets'])} gizli endpoint, "
+                      f"{body_count} body-parametreli:[/bold yellow]")
+        for t in result["api_schema_targets"][:30]:
+            params = list(t.get("params", {}).keys()) + list(t.get("body_params", {}).keys())
+            tag = f"({', '.join(params[:5])})" if params else ""
+            console.print(f"  • {t.get('method', 'GET')} {t['url'][:85]} {tag}")
+        console.print("[dim]  (pasif keşif — --active fuzzer'a otomatik beslenmiyor, "
+                      "manuel/Burp ile test et)[/dim]")
 
 
 def _plant_oob(result: dict, config: dict, session_dir: str, oob_domain: str, checker):

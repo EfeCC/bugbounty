@@ -39,6 +39,7 @@ def _neutralize_net(monkeypatch):
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: [])
 
 
 def test_reporter_receives_events(monkeypatch, tmp_path):

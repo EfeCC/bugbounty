@@ -67,21 +67,26 @@ class Triage:
         if not urls:
             urls = self._read_lines(os.path.join(session_dir, "livehosts.txt"))
         hosts = self._read_jsonl(os.path.join(session_dir, "httpx.jsonl"))
-        return self.analyze(urls, hosts)
+        api_targets = self._read_json_list(os.path.join(session_dir, "api_schema_targets.json"))
+        return self.analyze(urls, hosts, api_targets)
 
-    def analyze(self, urls: List[str], httpx_hosts: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    def analyze(self, urls: List[str], httpx_hosts: Optional[List[Dict]] = None,
+               api_schema_targets: Optional[List[Dict]] = None) -> Dict[str, Any]:
         param_targets = self._param_targets(urls)
         interesting = self._interesting_urls(urls)
         tech = self._tech_flags(httpx_hosts or [])
+        api_schema_targets = api_schema_targets or []
         return {
             "param_targets": param_targets,
             "interesting_urls": interesting,
             "tech": tech,
+            "api_schema_targets": api_schema_targets,
             "stats": {
                 "urls": len(urls),
                 "param_endpoints": len(param_targets),
                 "interesting": len(interesting),
                 "tech_flags": len(tech),
+                "api_schema_endpoints": len(api_schema_targets),
             },
         }
 
@@ -178,3 +183,16 @@ class Triage:
         except OSError:
             pass
         return out
+
+    @staticmethod
+    def _read_json_list(path: str) -> List[Dict]:
+        """Tek bir JSON dizisi içeren dosyayı okur (`api_schema_targets.json` gibi) —
+        `_read_jsonl`'den farklı olarak satır-satır JSON değil, tek bir JSON array."""
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []

@@ -17,6 +17,7 @@ def _neutralize_pipeline(monkeypatch):
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: [])
 
 
 def _fake_config(baseline_dir):

@@ -69,3 +69,19 @@ def test_analyze_dir_missing_files(tmp_path):
     r = Triage().analyze_dir(str(tmp_path))
     assert r["stats"]["urls"] == 0
     assert r["param_targets"] == []
+
+
+def test_analyze_dir_reads_api_schema_targets(tmp_path):
+    import json
+    targets = [{"url": "https://a.example.com/api/orders", "method": "POST",
+               "params": {}, "body_params": {"amount": []}}]
+    (tmp_path / "api_schema_targets.json").write_text(json.dumps(targets), encoding="utf-8")
+    r = Triage().analyze_dir(str(tmp_path))
+    assert r["stats"]["api_schema_endpoints"] == 1
+    assert r["api_schema_targets"][0]["url"] == "https://a.example.com/api/orders"
+
+
+def test_analyze_dir_api_schema_missing_is_graceful(tmp_path):
+    r = Triage().analyze_dir(str(tmp_path))
+    assert r["stats"]["api_schema_endpoints"] == 0
+    assert r["api_schema_targets"] == []

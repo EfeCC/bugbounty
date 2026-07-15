@@ -105,6 +105,7 @@ Detaylı iş akışı (Windsurf ile analiz dahil): [docs/windsurf-workflow.md](d
 - `bugtool/git_check.py` — `/.git/HEAD` ifşa doğrulama
 - `bugtool/cors_check.py` — CORS misconfig (reflection + credentials)
 - `bugtool/secrets_scan.py` — JS'te sızmış API-key (maskeli, 25 servis)
+- `bugtool/api_schema.py` — Swagger/OpenAPI şema keşfi (query+body param haritası, pasif)
 - `bugtool/monitor.py` — baseline diff (yeni + kaybolan asset) + webhook bildirimi
 - `bugtool/triage.py` — pasif çıktı analizi (tehlikeli param/dosya/tech)
 - `bugtool/payloads.py` — **tek-kaynak** payload arsenali + detektörler (encode/WAF-bypass)

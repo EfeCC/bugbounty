@@ -61,6 +61,7 @@ def _patch(monkeypatch, have=True):
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: [])
     # _probe_scheme (httpx boş sonuç yedek yöntemi) gerçek ağa çıkmasın — varsayılan
     # olarak "https" başarılı gibi davran (eski davranışla aynı sonuç, testler bozulmaz)
     import requests as _requests
@@ -271,6 +272,37 @@ def test_ctlogs_message_when_requests_available_but_empty(monkeypatch, tmp_path)
     wr.run_pipeline("example.com", output_dir=str(tmp_path), reporter=Rec())
     assert any("sertifika kaydı bulunamadı" in m for k, m in events if k == "skip")
     assert not any("kurulu değil" in m for k, m in events if k == "skip" and "crt.sh" in m)
+
+
+# ── apischema aşaması (Swagger/OpenAPI keşfi) ────────────────────────────────
+def test_apischema_stage_writes_targets_and_return_key(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    fake_targets = [{"url": "https://api.example.com/orders", "method": "POST",
+                     "params": {}, "body_params": {"amount": []}}]
+    monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: fake_targets)
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert p["api_schema_targets"] == fake_targets
+    assert "apischema" in p["stages_run"]
+    import json, os
+    out_file = os.path.join(str(tmp_path), "api_schema_targets.json")
+    assert os.path.exists(out_file)
+    with open(out_file, encoding="utf-8") as f:
+        assert json.load(f) == fake_targets
+
+
+def test_apischema_stage_can_be_disabled(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    called = {"n": 0}
+
+    def spy(*a, **k):
+        called["n"] += 1
+        return []
+    monkeypatch.setattr(webrecon_mod.api_schema, "discover", spy)
+    wr = WebRecon(stages={"apischema": False})
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "apischema" in p["stages_skipped"]
+    assert called["n"] == 0
 
 
 def test_webrecon_uses_probe_scheme_when_httpx_empty(monkeypatch, tmp_path):

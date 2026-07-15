@@ -37,12 +37,18 @@ webrecon:
   nuclei_severity: "low,medium,high,critical"
   max_urls: 3000
   timeout: 600
-  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets) hepsi pasif/
-  # düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
-  #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false}
-  # ctlogs/gitcheck/cors/secrets 'requests' yoksa, takeover 'dnsx' yoksa kendiliğinden atlanır.
+  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets/apischema) hepsi
+  # pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
+  #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false, apischema: false}
+  # ctlogs/gitcheck/cors/secrets/apischema 'requests' yoksa, takeover 'dnsx' yoksa
+  # kendiliğinden atlanır.
   stages: {}
   secrets_max_files: 40        # secret taraması için indirilecek max JS dosyası (cap)
+  # API şema keşfi (Swagger/OpenAPI) — bilinen konumlarda + keşfedilen URL'lerde şema
+  # dosyası arar, query+body parametreli endpoint haritası çıkarır (bkz. api_schema.py).
+  # Tamamen pasif/GET-only. Body-param'lar --active fuzzer'a BESLENMEZ (henüz POST/JSON
+  # body fuzzing desteği yok) — sadece bilgi/triyaj amaçlı, triage çıktısında görünür.
+  apischema_max_hosts: 15      # kaç canlı host'ta şema dosyası aransın (patlamayı önler)
   # İçerik keşfi / dizin brute (ffuf) — linklenmemiş /admin, /.git, /backup yollarını bulur
   ffuf_wordlist: ""            # boşsa yaygın SecLists/dirb konumları otomatik denenir
   ffuf_max_hosts: 10           # kaç canlı host'ta ffuf koşulsun (patlamayı önler)

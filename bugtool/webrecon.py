@@ -39,6 +39,7 @@ from . import takeover
 from . import secrets_scan
 from . import git_check
 from . import cors_check
+from . import api_schema
 
 
 class WebRecon:
@@ -49,7 +50,7 @@ class WebRecon:
                  timeout: int = 600, max_urls: int = 3000, stages: Optional[Dict[str, bool]] = None,
                  ffuf_wordlist: str = "", ffuf_max_hosts: int = 10,
                  ffuf_codes: str = "200,204,301,302,307,401,403,405,500",
-                 secrets_max_files: int = 40):
+                 secrets_max_files: int = 40, apischema_max_hosts: int = 15):
         self.passive_only = passive_only
         self.rate_limit = rate_limit
         self.concurrency = concurrency
@@ -61,6 +62,7 @@ class WebRecon:
         self.ffuf_max_hosts = ffuf_max_hosts
         self.ffuf_codes = ffuf_codes
         self.secrets_max_files = secrets_max_files
+        self.apischema_max_hosts = apischema_max_hosts
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "WebRecon":
@@ -77,6 +79,7 @@ class WebRecon:
             ffuf_max_hosts=int(wc.get("ffuf_max_hosts", 10)),
             ffuf_codes=str(wc.get("ffuf_codes", "200,204,301,302,307,401,403,405,500")),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
+            apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
         )
 
     def _find_wordlist(self) -> str:
@@ -425,6 +428,31 @@ class WebRecon:
         else:
             stages_skipped.append("secrets")
 
+        # ── 4d. Swagger/OpenAPI şema keşfi ────────────────────────────
+        # Bilinen konumlarda + keşfedilen URL'ler arasında şema dosyası arar, bulursa
+        # query+body parametreli TAM endpoint haritasını çıkarır (bkz. api_schema.py).
+        # Tamamen pasif/GET-only, --active gerektirmez. NOT: body_params/body_template
+        # şu an sadece bilgi amaçlı — fuzzer'a otomatik BESLENMEZ (fuzzer henüz POST/
+        # JSON body fuzzing desteklemiyor, bu ayrı bir özellik).
+        api_targets: List[Dict[str, Any]] = []
+        if self._stage_on("apischema"):
+            with reporter.stage("API şema keşfi (Swagger/OpenAPI)"):
+                api_targets = api_schema.discover(
+                    live_urls, urls, max_hosts=self.apischema_max_hosts,
+                    timeout=self.timeout, scope_checker=_in_scope)
+                if api_targets:
+                    self._write_json(os.path.join(output_dir, "api_schema_targets.json"),
+                                     api_targets)
+            stages_run.append("apischema")
+            if api_targets:
+                body_count = sum(1 for t in api_targets if t.get("body_params"))
+                reporter.done(f"{len(api_targets)} gizli API endpoint'i (şemadan) — "
+                              f"{body_count} tanesi body-parametreli")
+            else:
+                reporter.done("şema dosyası bulunamadı")
+        else:
+            stages_skipped.append("apischema")
+
         # ── 5. nuclei ────────────────────────────────────────────────
         # NOT: `findings` fonksiyonun başında başlatıldı (subdomain-takeover da aynı
         # listeye ekliyor) — burada sıfırlanmıyor, üzerine ekleniyor (extend).
@@ -451,6 +479,7 @@ class WebRecon:
             "urls": urls,
             "discovered_endpoints": endpoints,
             "findings": findings,
+            "api_schema_targets": api_targets,
             "stages_run": stages_run,
             "stages_skipped": stages_skipped,
             "output_dir": output_dir,
@@ -545,5 +574,13 @@ class WebRecon:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(raw or "")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _write_json(path: str, data: Any):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except OSError:
             pass
