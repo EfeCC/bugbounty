@@ -285,7 +285,8 @@ def test_apischema_stage_writes_targets_and_return_key(monkeypatch, tmp_path):
     assert p["api_schema_targets"] == fake_targets
     assert "apischema" in p["stages_run"]
     import json, os
-    out_file = os.path.join(str(tmp_path), "api_schema_targets.json")
+    from bugtool import artifacts
+    out_file = artifacts.out_path(str(tmp_path), "api_schema")   # 07_api_sema_hedefleri.json
     assert os.path.exists(out_file)
     with open(out_file, encoding="utf-8") as f:
         assert json.load(f) == fake_targets
@@ -325,6 +326,7 @@ def test_webrecon_uses_probe_scheme_when_httpx_empty(monkeypatch, tmp_path):
 
     wr = WebRecon()
     p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
-    with open(f"{tmp_path}/livehosts.txt", encoding="utf-8") as f:
+    from bugtool import artifacts
+    with open(artifacts.out_path(str(tmp_path), "livehosts"), encoding="utf-8") as f:
         content = f.read()
     assert "http://" in content and "https://" not in content

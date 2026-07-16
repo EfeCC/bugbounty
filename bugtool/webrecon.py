@@ -34,12 +34,25 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from .shell import have, run
+from . import artifacts
 from . import ct_logs
 from . import takeover
 from . import secrets_scan
 from . import git_check
 from . import cors_check
 from . import api_schema
+
+# Nuclei için tech-BAĞIMSIZ yüksek-değerli şablon seti (varsayılan). `-as` (automatic
+# scan) yalnızca httpx'in tespit ettiği teknolojiye göre şablon seçer; modern SPA/API
+# hedeflerinde tech tespiti zayıf olduğunda (ör. sadece 'HSTS') neredeyse hiç şablon
+# çalıştırmaz → nuclei işlevsiz kalır. Bu set ise stack'ten bağımsız olarak HER hedefte
+# en yüksek sinyalli kontrolleri çalıştırır: ifşa olmuş dosyalar (.env/.git/backup),
+# yanlış yapılandırma, default-login, açık panel, subdomain-takeover, genel zafiyetler.
+# CVE'ler (çoğu ürün/sürüm-spesifik, custom app'te eşleşmez) ve salt-fingerprint
+# 'technologies' seti bilerek DIŞARIDA — hız için. Tam tarama isteyen boş bırakır.
+DEFAULT_NUCLEI_TEMPLATES = ("http/exposures/,http/misconfiguration/,http/default-logins/,"
+                            "http/exposed-panels/,http/takeovers/,http/vulnerabilities/,"
+                            "dns/,ssl/")
 
 
 class WebRecon:
@@ -53,7 +66,8 @@ class WebRecon:
                  ffuf_timeout: int = 120,
                  katana_max_hosts: int = 15, katana_crawl_duration: int = 300,
                  nuclei_timeout: int = 1200,
-                 nuclei_auto_scan: bool = True,
+                 nuclei_auto_scan: bool = False,
+                 nuclei_templates: str = DEFAULT_NUCLEI_TEMPLATES,
                  nuclei_exclude_tags: str = "dos,fuzz,intrusive",
                  secrets_max_files: int = 40, apischema_max_hosts: int = 15,
                  probe_timeout: int = 8, probe_concurrency: int = 20):
@@ -71,13 +85,14 @@ class WebRecon:
         self.katana_max_hosts = katana_max_hosts
         self.katana_crawl_duration = katana_crawl_duration
         self.nuclei_timeout = nuclei_timeout
-        # DÜZELTME: nuclei filtresiz binlerce şablonu (kurulu template repo'sunun TAMAMI)
+        # DÜZELTME: nuclei filtresiz kurulu template repo'sunun TAMAMINI (binlerce şablon)
         # her host'a karşı deniyordu → tek host'ta bile nuclei_timeout'a çarpıp yarım
-        # kesiliyordu. `-as` httpx'in tespit ettiği teknolojiye göre sadece ilgili
-        # şablonları seçer (wappalyzer tag-mapping); `-etags` ile de yavaş/riskli
-        # (dos/fuzz/intrusive) kategoriler hariç tutulur — VDP'nin "no disruption"
-        # kuralına da uygun.
+        # kesiliyordu. Çözüm: varsayılan olarak tech-bağımsız yüksek-değerli şablon setini
+        # (DEFAULT_NUCLEI_TEMPLATES, `-t` ile) çalıştır — hem hızlı hem stack'ten bağımsız.
+        # `-as` (auto-scan) opsiyoneldir ama tech tespiti zayıf hedeflerde işe yaramaz,
+        # o yüzden artık varsayılan DEĞİL. `-etags` yavaş/riskli kategorileri hariç tutar.
         self.nuclei_auto_scan = nuclei_auto_scan
+        self.nuclei_templates = nuclei_templates
         self.nuclei_exclude_tags = nuclei_exclude_tags
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
@@ -104,7 +119,9 @@ class WebRecon:
             katana_max_hosts=int(wc.get("katana_max_hosts", 15)),
             katana_crawl_duration=int(wc.get("katana_crawl_duration", 300)),
             nuclei_timeout=int(wc.get("nuclei_timeout", 1200)),
-            nuclei_auto_scan=bool(wc.get("nuclei_auto_scan", True)),
+            nuclei_auto_scan=bool(wc.get("nuclei_auto_scan", False)),
+            # Anahtar yoksa → varsayılan set; boş string/null → "" (tam tarama escape-hatch'i).
+            nuclei_templates=str(wc.get("nuclei_templates", DEFAULT_NUCLEI_TEMPLATES) or ""),
             nuclei_exclude_tags=str(wc.get("nuclei_exclude_tags", "dos,fuzz,intrusive") or ""),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
@@ -138,7 +155,7 @@ class WebRecon:
         Döner: (bulunan URL'ler, aşama başarılı mı)."""
         base = host.rstrip("/")
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("_") or "host"
-        out_json = os.path.join(output_dir, f"ffuf_{safe_name}.json")
+        out_json = os.path.join(output_dir, artifacts.ffuf_name(safe_name))
         # -maxtime: ffuf'un kendisini kesmesi (graceful stop → JSON dosyası oluşur)
         # -maxtime-job: her host-path denemesi için max süre
         # Subprocess timeout = maxtime + 15sn tampon (ffuf'un JSON'ı yazması için)
@@ -286,7 +303,7 @@ class WebRecon:
         seen = set()
         subdomains = [s for s in subdomains
                       if s not in seen and not seen.add(s) and _in_scope(s)]
-        subs_file = os.path.join(output_dir, "subdomains.txt")
+        subs_file = artifacts.out_path(output_dir, "subdomains")
         self._write_lines(subs_file, subdomains)
         if "subfinder" in stages_run:
             reporter.done(f"{len(subdomains)} subdomain (scope-içi) bulundu", subs_file)
@@ -305,7 +322,7 @@ class WebRecon:
         else:
             stages_skipped.append("dnsx")
             reporter.skip("DNS çözümleme (dnsx) atlandı")
-        resolved_file = os.path.join(output_dir, "resolved.txt")
+        resolved_file = artifacts.out_path(output_dir, "resolved")
         self._write_lines(resolved_file, resolved)
 
         # ── 2b. Subdomain takeover kontrolü ──────────────────────────
@@ -336,11 +353,11 @@ class WebRecon:
                        f"-rl {self.rate_limit} -threads {self.concurrency}")
                 r = run(cmd, timeout=self.timeout)
                 live_hosts = self._parse_httpx(r["stdout"])
-                self._write_raw(os.path.join(output_dir, "httpx.jsonl"), r["stdout"])
+                self._write_raw(artifacts.out_path(output_dir, "httpx"), r["stdout"])
             self._warn_if_failed(reporter, r, "httpx")
             stages_run.append("httpx")
             reporter.done(f"{len(live_hosts)} canlı web servisi",
-                          os.path.join(output_dir, "httpx.jsonl"))
+                          artifacts.out_path(output_dir, "httpx"))
         else:
             stages_skipped.append("httpx")
             reporter.skip("HTTP probe (httpx) kurulu değil — atlandı")
@@ -355,7 +372,7 @@ class WebRecon:
             # (https varsay) aynı sonuca düşülür — regresyon yok.
             reporter.info("httpx sonuç vermedi — host başına http/https deneniyor (yedek yöntem)…")
             live_urls = [f"{self._probe_scheme(h)}://{h}" for h in resolved[:50]]
-        live_file = os.path.join(output_dir, "livehosts.txt")
+        live_file = artifacts.out_path(output_dir, "livehosts")
         self._write_lines(live_file, live_urls)
 
         # ── 3b. Git deposu ifşası doğrulama ──────────────────────────
@@ -400,7 +417,7 @@ class WebRecon:
             #   - -rl ve -c ile rate/concurrency kontrollü
             #   - subprocess timeout = crawl_duration + 30sn tampon
             katana_hosts = live_urls[:self.katana_max_hosts]
-            katana_file = os.path.join(output_dir, "katana_targets.txt")
+            katana_file = artifacts.out_path(output_dir, "katana")
             self._write_lines(katana_file, katana_hosts)
             crawl_dur = self.katana_crawl_duration
             reporter.info(f"Katana: {len(katana_hosts)} host (max {self.katana_max_hosts}), "
@@ -468,7 +485,7 @@ class WebRecon:
                 reporter.skip("İçerik keşfi (ffuf) atlandı (passive_only)")
 
         urls = self._dedup_scope_urls(urls, _in_scope)[: self.max_urls]
-        urls_file = os.path.join(output_dir, "urls.txt")
+        urls_file = artifacts.out_path(output_dir, "urls")
         self._write_lines(urls_file, urls)
         endpoints = self._extract_endpoints(urls)
         if any(s in stages_run for s in ("katana", "gau", "ffuf")):
@@ -506,7 +523,7 @@ class WebRecon:
                     timeout=self.probe_timeout, concurrency=self.probe_concurrency,
                     scope_checker=_in_scope)
                 if api_targets:
-                    self._write_json(os.path.join(output_dir, "api_schema_targets.json"),
+                    self._write_json(artifacts.out_path(output_dir, "api_schema"),
                                      api_targets)
             stages_run.append("apischema")
             if api_targets:
@@ -531,24 +548,34 @@ class WebRecon:
                                 f"max {self.nuclei_timeout // 60}dk)"):
                 cmd = (f"nuclei -l {live_file} -jsonl -silent -severity {self.nuclei_severity} "
                        f"-rl {self.rate_limit} -c {self.concurrency} -timeout 10")
+                # Şablon seçimi (kurulu template repo'sunun TAMAMINI denemek yavaşlığın
+                # asıl sebebiydi): önce -as (istenirse), yoksa tech-bağımsız yüksek-değerli
+                # set (-t ile), ikisi de yoksa tam tarama.
                 if self.nuclei_auto_scan:
-                    # Kurulu template repo'sunun TAMAMINI (binlerce şablon) her host'a
-                    # karşı denemek yerine, httpx'in bulduğu teknolojiye göre yalnızca
-                    # ilgili şablonları seçer — asıl yavaşlığın sebebi buydu.
                     cmd += " -as"
+                elif self.nuclei_templates:
+                    for tmpl in self.nuclei_templates.split(","):
+                        tmpl = tmpl.strip()
+                        if tmpl:
+                            cmd += f" -t {tmpl}"
                 if self.nuclei_exclude_tags:
                     cmd += f" -etags {self.nuclei_exclude_tags}"
                 r = run(cmd, timeout=self.nuclei_timeout)
-                self._write_raw(os.path.join(output_dir, "nuclei.jsonl"), r["stdout"])
+                self._write_raw(artifacts.out_path(output_dir, "nuclei"), r["stdout"])
                 nuclei_findings = self._parse_nuclei(r["stdout"])
                 findings.extend(nuclei_findings)
             self._warn_if_failed(reporter, r, "nuclei")
             stages_run.append("nuclei")
             reporter.done(f"{len(nuclei_findings)} nuclei bulgusu",
-                          os.path.join(output_dir, "nuclei.jsonl"))
+                          artifacts.out_path(output_dir, "nuclei"))
         else:
             stages_skipped.append("nuclei")
             reporter.skip("Zafiyet taraması (nuclei) kurulu değil — atlandı")
+
+        # 00_OZET.txt — klasördeki her dosyanın ne olduğunu + adetleri anlatan insan-okunur
+        # index. Aktif test bu klasörü kullanırken hangi dosyanın ne içerdiği net olsun diye.
+        self._write_summary(output_dir, target, domain, subdomains, live_hosts, urls,
+                            endpoints, findings, api_targets, stages_run, stages_skipped)
 
         return {
             "domain": domain,
@@ -562,6 +589,55 @@ class WebRecon:
             "stages_skipped": stages_skipped,
             "output_dir": output_dir,
         }
+
+    def _write_summary(self, output_dir, target, domain, subdomains, live_hosts, urls,
+                       endpoints, findings, api_targets, stages_run, stages_skipped):
+        """00_OZET.txt — site + tüm çıktı dosyalarının açıklaması ve adetleri (Türkçe)."""
+        from datetime import datetime
+        # Anahtar başına gösterilecek adet (bilinmiyorsa None → sadece "var/yok").
+        counts = {
+            "subdomains": len(subdomains),
+            "livehosts": len(live_hosts),
+            "urls": len(urls),
+            "api_schema": len(api_targets),
+            "nuclei": sum(1 for f in findings if str(f.get("title", "")).startswith("Nuclei:")),
+        }
+        lines = [
+            f"GitSec Recon Özeti — {domain}",
+            f"Hedef: {target}",
+            f"Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Klasör: {output_dir}",
+            "",
+            f"Subdomain: {len(subdomains)} · Canlı host: {len(live_hosts)} · "
+            f"URL: {len(urls)} · Endpoint: {len(endpoints)} · "
+            f"Recon bulgusu: {len(findings)} · API şema: {len(api_targets)}",
+            "",
+            "Bu klasördeki dosyalar (numara = aşama sırası):",
+        ]
+        for key in ("subdomains", "resolved", "livehosts", "httpx", "urls",
+                    "api_endpoints", "api_schema", "nuclei", "findings", "oob"):
+            name = artifacts.new_name(key)
+            desc = artifacts.DESCRIPTIONS.get(key, "")
+            exists = os.path.exists(os.path.join(output_dir, name))
+            cnt = counts.get(key)
+            mark = f" ({cnt} adet)" if (cnt is not None and exists) else (
+                "" if exists else " — (henüz yok)")
+            lines.append(f"  {name:<28} — {desc}{mark}")
+        lines += [
+            "  icerik_kesfi_<host>.json     — ffuf içerik keşfi (host başına)",
+            "  katana_hedefleri.txt         — katana'ya verilen host listesi (ara dosya)",
+            "",
+            f"Çalışan aşamalar: {', '.join(stages_run)}",
+            f"Atlanan aşamalar: {', '.join(stages_skipped)}",
+            "",
+            "Aktif test için (bu reconu yeniden kullanır): "
+            "python main.py triage --active --dir " + output_dir,
+        ]
+        try:
+            with open(artifacts.out_path(output_dir, "summary"), "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError:
+            pass
 
     # ── Parse yardımcıları ───────────────────────────────────────────
     def _parse_httpx(self, stdout: str) -> List[Dict[str, Any]]:

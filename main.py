@@ -18,7 +18,9 @@ from bugtool.webrecon import WebRecon
 from bugtool.monitor import AssetMonitor
 from bugtool.scope import ScopeChecker
 from bugtool.triage import Triage
+from bugtool import artifacts
 from bugtool.fuzzer import ParamFuzzer
+from bugtool.api_probe import ApiProbe
 from bugtool.reporter import ConsoleReporter
 from bugtool.oob import OobManager, read_hit_tokens
 from bugtool.shell import set_binary_paths, detect_httpx_conflict
@@ -313,10 +315,24 @@ def _latest_reports_dir() -> str:
     return max(dirs, key=os.path.getmtime) if dirs else ""
 
 
+def _write_api_endpoints_file(session_dir: str, result: dict):
+    """Triyajda çıkarılan path-tabanlı API endpoint'lerini 06_api_endpointler.txt'ye yazar
+    (göz gezdirilebilir liste + aktif testin hedefi)."""
+    eps = result.get("api_endpoints") or []
+    if not session_dir or not eps:
+        return
+    try:
+        with open(artifacts.out_path(session_dir, "api_endpoints"), "w", encoding="utf-8") as f:
+            f.write("\n".join(e["url"] for e in eps) + "\n")
+    except OSError:
+        pass
+
+
 def _render_triage(result: dict):
     """Triyaj sonucunu (ilginç URL / tech / parametreli endpoint / API şema) konsola basar."""
     s = result["stats"]
     console.print(f"[dim]  {s['urls']} URL · {s['param_endpoints']} parametreli endpoint · "
+                  f"{s.get('api_endpoints', 0)} API endpoint · "
                   f"{s['interesting']} ilginç URL · {s['tech_flags']} tech işareti · "
                   f"{s.get('api_schema_endpoints', 0)} API şema endpoint'i[/dim]")
     if result["interesting_urls"]:
@@ -336,6 +352,12 @@ def _render_triage(result: dict):
                 # kullanıcı "bundan ne çıkar?" diye sormasın.
                 tag = ", ".join(classes) if classes else "varsayılan: xss/sqli/redirect"
                 console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
+    if result.get("api_endpoints"):
+        eps = result["api_endpoints"]
+        console.print(f"\n[bold yellow]🧩 Path-tabanlı API Endpoint'ler ({len(eps)}) "
+                      f"— --active ile metot/yetki + kör SSRF test edilir:[/bold yellow]")
+        for e in eps[:40]:
+            console.print(f"  • {e['url'][:100]}")
     if result.get("api_schema_targets"):
         body_count = sum(1 for t in result["api_schema_targets"] if t.get("body_params"))
         console.print(f"\n[bold yellow]📋 API Şema Keşfi (Swagger/OpenAPI) — "
@@ -349,30 +371,36 @@ def _render_triage(result: dict):
                       "manuel/Burp ile test et)[/dim]")
 
 
-def _plant_oob(result: dict, config: dict, session_dir: str, oob_domain: str, checker):
-    """OOB problarını (kör SSRF/CMDi/XSS) gömer, prob deposunu kaydeder, kullanıcıya
-    collaborator'ında ne arayacağını + nasıl korele edeceğini söyler."""
-    fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)
-    if not fuzzer.available:
-        console.print("[bold red]❌ 'requests' kurulu değil — OOB probu gömülemiyor.[/bold red]")
+def _render_api_probe(api_res: dict, sent: int):
+    """API-probe sonucunu (metot/yetki haritası tablosu) konsola basar."""
+    mm = api_res.get("method_map", [])
+    console.print(f"\n[bold]API-probe bitti — {sent} istek, "
+                  f"{len(api_res.get('findings', []))} ipucu, "
+                  f"{api_res.get('oob_planted', 0)} OOB probu.[/bold]")
+    if not mm:
         return
-    oob = OobManager(oob_domain, seed=os.path.basename(session_dir.rstrip("/\\")) or "bugtool")
-    console.print(Panel(
-        f"[bold magenta]📡 OOB / OAST prob ekimi[/bold magenta] — collaborator: {oob_domain}\n"
-        f"[dim]Kör SSRF/CMDi/XSS için korele token'lı payload'lar gömülüyor "
-        f"(scope-içi).[/dim]", border_style="magenta"))
-    with console.status("[magenta]OOB probları gömülüyor…[/magenta]", spinner="dots"):
-        planted = fuzzer.plant_oob(result["param_targets"], oob)
-    probe_file = os.path.join(session_dir, "oob_probes.json")
-    oob.save(probe_file)
-    console.print(f"[bold]{planted} OOB probu gömüldü[/bold] — depo: {probe_file}")
-    console.print(f"[dim]  1) Collaborator panelinde/{oob_domain} altında gelen callback'leri izle.[/dim]")
-    console.print(f"[dim]  2) Gelen token'ları bir dosyaya al, sonra:[/dim]")
-    console.print(f"[cyan]     python main.py oob-correlate --dir {session_dir} --hits hits.txt[/cyan]")
+    table = Table(title="🔎 Metot / Yetki Haritası (kimliksiz)")
+    table.add_column("Endpoint", overflow="fold", style="cyan")
+    table.add_column("GET", justify="right")
+    table.add_column("Allow (OPTIONS)")
+    table.add_column("Not")
+    for row in mm[:60]:
+        st = row.get("get_status")
+        if isinstance(st, int) and 200 <= st < 300:
+            color = "green"
+        elif isinstance(st, int) and st >= 500:
+            color = "red"
+        else:
+            color = "yellow"
+        st_s = f"[{color}]{st}[/{color}]" if st is not None else "—"
+        ep = row.get("url", "").split("://", 1)[-1]
+        table.add_row(ep, st_s, (row.get("allow") or "")[:40], row.get("note", ""))
+    console.print(table)
 
 
 def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: str = ""):
-    """Aktif detection-payload testini çalıştırır (opt-in). POTANSİYEL bulguları kaydeder.
+    """Aktif test (opt-in): query-param fuzzing + path-tabanlı API-probe (metot/yetki +
+    kör SSRF OOB). POTANSİYEL bulguları kaydeder.
 
     GÜVENLİK: gerçek bir kapsam (scope.txt dolu VEYA allowed_targets) yoksa SERT DURUR —
     hiç istek atmaz. Eskiden yalnızca sarı uyarı basıp devam ediyordu; taze kurulumda
@@ -388,54 +416,103 @@ def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: s
             "scope.allowed_targets'ı doldur, sonra tekrar dene.[/dim]",
             border_style="red"))
         return
+
+    param_targets = result.get("param_targets") or []
+    api_endpoints = result.get("api_endpoints") or []
+    if not param_targets and not api_endpoints:
+        console.print("[dim]  Aktif test için parametreli endpoint / API endpoint yok — atlandı.[/dim]")
+        return
+
     fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)
     if not fuzzer.available:
         console.print("[bold red]❌ 'requests' kurulu değil — aktif test yapılamıyor "
                       "(pip install requests).[/bold red]")
         return
-    if not result["param_targets"]:
-        console.print("[dim]  Aktif test için parametreli endpoint yok — atlandı.[/dim]")
-        return
 
-    console.print(Panel(
-        f"[bold red]⚡ AKTİF TEST[/bold red] — {len(result['param_targets'])} endpoint, "
-        f"max {fuzzer.max_requests} istek, delay {fuzzer.delay}s.\n"
-        f"[dim]Non-destructive detection payload'ları · yalnızca scope-içi host'lar.[/dim]",
-        border_style="red"))
+    all_findings: list = []
+    # OOB manager'ı bir kez oluştur — hem param query probları hem API SSRF probları AYNI
+    # depoya (oob_probes.json) yazsın ki tek `oob-correlate` ile hepsi eşleşsin.
+    oob = (OobManager(oob_domain, seed=os.path.basename(session_dir.rstrip("/\\")) or "bugtool")
+           if oob_domain else None)
+    oob_planted = 0
 
-    def _report(f):
-        if f.get("verdict") == "inconclusive":
-            console.print(f"  [yellow]❓ {f['class'].upper()} (BELİRSİZ)[/yellow] "
-                          f"{f['param']} @ {f['url'][:66]} — {f['evidence'][:80]}")
-        else:
-            console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
-                          f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
+    # ── 1. Query-param fuzzing (?param= olan URL'ler) ──
+    if param_targets:
+        console.print(Panel(
+            f"[bold red]⚡ AKTİF TEST (parametre)[/bold red] — {len(param_targets)} endpoint, "
+            f"max {fuzzer.max_requests} istek, delay {fuzzer.delay}s.\n"
+            f"[dim]Non-destructive detection payload'ları · yalnızca scope-içi host'lar.[/dim]",
+            border_style="red"))
 
-    with console.status("[bold red]Aktif test başlıyor…[/bold red]", spinner="dots") as status:
-        def _progress(i, total, sent, nf):
-            status.update(f"[bold red]Aktif test — {i}/{total} endpoint · {sent} istek · "
-                          f"{nf} POTANSİYEL bulgu[/bold red]")
-        findings = fuzzer.fuzz_targets(result["param_targets"],
-                                       on_finding=_report, on_progress=_progress)
+        def _report(f):
+            if f.get("verdict") == "inconclusive":
+                console.print(f"  [yellow]❓ {f['class'].upper()} (BELİRSİZ)[/yellow] "
+                              f"{f['param']} @ {f['url'][:66]} — {f['evidence'][:80]}")
+            else:
+                console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
+                              f"({f['confidence']}) {f['param']} @ {f['url'][:70]} — {f['evidence'][:90]}")
 
-    fired = [f for f in findings if f.get("verdict") != "inconclusive"]
-    incon = [f for f in findings if f.get("verdict") == "inconclusive"]
-    console.print(f"\n[bold]Aktif test bitti — {fuzzer._sent} istek, "
-                  f"{len(fired)} POTANSİYEL + {len(incon)} BELİRSİZ bulgu.[/bold]")
-    if fuzzer.backoff_triggered:
-        console.print("[yellow]  ⚠ Hedef art arda 403/429 döndü — WAF/rate-limit'e çarpıldı, "
-                      "tarama erken durduruldu.[/yellow]")
-    out_file = os.path.join(session_dir, "triage_findings.json")
+        with console.status("[bold red]Aktif test başlıyor…[/bold red]", spinner="dots") as status:
+            def _progress(i, total, sent, nf):
+                status.update(f"[bold red]Aktif test — {i}/{total} endpoint · {sent} istek · "
+                              f"{nf} POTANSİYEL bulgu[/bold red]")
+            findings = fuzzer.fuzz_targets(param_targets, on_finding=_report, on_progress=_progress)
+        all_findings.extend(findings)
+        fired = [f for f in findings if f.get("verdict") != "inconclusive"]
+        incon = [f for f in findings if f.get("verdict") == "inconclusive"]
+        console.print(f"\n[bold]Parametre testi bitti — {fuzzer._sent} istek, "
+                      f"{len(fired)} POTANSİYEL + {len(incon)} BELİRSİZ bulgu.[/bold]")
+        if fuzzer.backoff_triggered:
+            console.print("[yellow]  ⚠ Hedef art arda 403/429 döndü — WAF/rate-limit'e çarpıldı, "
+                          "tarama erken durduruldu.[/yellow]")
+
+    # ── 2. Path-tabanlı API-probe (metot/yetki haritası + kör SSRF OOB) ──
+    if api_endpoints:
+        api = ApiProbe.from_config(config, scope_checker=checker.is_in_scope)
+        if api.available:
+            console.print(Panel(
+                f"[bold red]⚡ API-PROBE[/bold red] — {len(api_endpoints)} path-tabanlı endpoint.\n"
+                f"[dim]Metot/yetki haritası (OPTIONS+GET, non-destructive)"
+                + (f" + kör SSRF OOB → {oob_domain}" if oob else "")
+                + " · yalnızca scope-içi.[/dim]", border_style="red"))
+
+            def _areport(f):
+                console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
+                              f"({f['confidence']}) {f['param']} @ {f['url'][:64]} — {f['evidence'][:80]}")
+
+            with console.status("[bold red]API-probe…[/bold red]", spinner="dots") as status:
+                def _aprog(i, total, sent, nf):
+                    status.update(f"[bold red]API-probe — {i}/{total} endpoint · {sent} istek · "
+                                  f"{nf} ipucu[/bold red]")
+                api_res = api.probe(api_endpoints, oob=oob, on_finding=_areport, on_progress=_aprog)
+            all_findings.extend(api_res["findings"])
+            oob_planted += api_res.get("oob_planted", 0)
+            _render_api_probe(api_res, api._sent)
+            if api.backoff_triggered:
+                console.print("[yellow]  ⚠ API-probe: hedef art arda 403/429 döndü — erken durduruldu.[/yellow]")
+
+    # ── 3. Parametre OOB ekimi (kör SSRF/CMDi/XSS — query params) ──
+    if oob and param_targets:
+        with console.status("[magenta]Parametre OOB probları gömülüyor…[/magenta]", spinner="dots"):
+            oob_planted += fuzzer.plant_oob(param_targets, oob)
+
+    # ── OOB deposunu kaydet + korelasyon talimatı ──
+    if oob:
+        probe_file = artifacts.out_path(session_dir, "oob")
+        oob.save(probe_file)
+        console.print(f"\n[bold magenta]📡 {oob_planted} OOB probu gömüldü[/bold magenta] "
+                      f"(collaborator: {oob_domain}) — depo: {probe_file}")
+        console.print(f"[dim]  1) {oob_domain} altında gelen callback'leri izle.[/dim]")
+        console.print(f"[dim]  2) Gelen token'ları bir dosyaya al, sonra:[/dim]")
+        console.print(f"[cyan]     python main.py oob-correlate --dir {session_dir} --hits hits.txt[/cyan]")
+
+    # ── bulguları kaydet ──
+    out_file = artifacts.out_path(session_dir, "findings")
     with open(out_file, "w", encoding="utf-8") as f:
-        json.dump({"findings": findings}, f, indent=2, ensure_ascii=False)
-    console.print(f"[dim]  Bulgular: {out_file}[/dim]")
-    if findings:
+        json.dump({"findings": all_findings}, f, indent=2, ensure_ascii=False)
+    console.print(f"\n[dim]  Bulgular: {out_file}[/dim]")
+    if all_findings:
         console.print("[dim]  Hepsi POTANSİYEL — Windsurf/Burp ile manuel doğrula.[/dim]")
-
-    # ── OOB / OAST (kör açıklar) — opsiyonel, collaborator domain'i verildiyse ──
-    if oob_domain:
-        console.print()
-        _plant_oob(result, config, session_dir, oob_domain, checker)
 
 
 @cli.command()
@@ -466,6 +543,7 @@ def triage(session_dir, active, oob_domain):
     with console.status("[bold cyan]Recon çıktısı analiz ediliyor (param/dosya/tech)…[/bold cyan]",
                         spinner="dots"):
         result = Triage().analyze_dir(session_dir)
+    _write_api_endpoints_file(session_dir, result)
     _render_triage(result)
 
     if not active:
@@ -511,13 +589,16 @@ def hunt(target, passive, active, oob_domain):
     console.print("\n[bold cyan]▶ Aşama 2/2 — Triyaj[/bold cyan]")
     with console.status("[bold cyan]Recon çıktısı analiz ediliyor…[/bold cyan]", spinner="dots"):
         result = Triage().analyze_dir(output_dir)
+    _write_api_endpoints_file(output_dir, result)
     _render_triage(result)
 
     if active:
         _run_active_test(result, config, output_dir, oob_domain=oob_domain)
     else:
-        console.print("\n[dim]  Aktif test için: python main.py hunt "
-                      f"{target} --active[/dim]")
+        # Recon zaten bu dizine kaydedildi — aktif test için tekrar recon YAPMAYA gerek yok.
+        # `triage --active` bu son reconu yeniden kullanır (hunt --active baştan recon yapardı).
+        console.print("\n[dim]  Aktif test (bu reconu yeniden kullanır, tekrar recon YAPMAZ):[/dim]")
+        console.print("[cyan]    python main.py triage --active[/cyan]")
 
 
 @cli.command(name="oob-correlate")
@@ -532,7 +613,7 @@ def oob_correlate(session_dir, hits_file):
     """
     if not session_dir:
         session_dir = _latest_reports_dir()
-    probe_file = os.path.join(session_dir or "", "oob_probes.json")
+    probe_file = artifacts.read_path(session_dir or "", "oob")
     oob = OobManager.load(probe_file)
     if oob is None:
         console.print(f"[bold red]❌ OOB prob deposu bulunamadı: {probe_file}[/bold red]")
@@ -553,8 +634,8 @@ def oob_correlate(session_dir, hits_file):
         console.print("[dim]  Eşleşme yok — gelen token'lar bu oturumun problarıyla örtüşmüyor.[/dim]")
         return
 
-    # Mevcut triage_findings.json'a ekle (varsa)
-    out_file = os.path.join(session_dir, "triage_findings.json")
+    # Mevcut bulgular dosyasına ekle (varsa) — yeni ad yoksa legacy'e düşer.
+    out_file = artifacts.read_path(session_dir, "findings")
     existing = []
     if os.path.exists(out_file):
         try:

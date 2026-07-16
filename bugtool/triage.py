@@ -15,6 +15,7 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from . import artifacts
 from .payloads import hints_for_param
 
 # ── İfşa/hassas dosya & path imzaları ────────────────────────────────────────
@@ -51,6 +52,13 @@ _STATIC_ASSET_RE = re.compile(
 _CACHEBUSTER_PARAMS = {"ver", "version", "v", "cache", "cachebuster", "cb",
                        "nocache", "rev", "revision", "_"}
 
+# Path-tabanlı API endpoint imzası (query parametresi olmayan REST/JSON endpoint'leri).
+# Modern SPA/API hedeflerinde asıl saldırı yüzeyi budur; query-param fuzzer'ı bunları
+# göremez, o yüzden ayrı bir liste olarak çıkarılıp API-probe'a (metot/yetki + OOB) verilir.
+_API_PATH_RE = re.compile(
+    r"/(?:api|v\d+|graphql|graphiql|rest|internal|admin|actuator|oauth|"
+    r"swagger|openapi)(?:/|$)", re.I)
+
 # İlginç/versiyonlu teknoloji sinyalleri (httpx tech alanı)
 _TECH_FLAGS = ["wordpress", "joomla", "drupal", "jira", "confluence", "jenkins", "gitlab",
                "tomcat", "struts", "spring", "phpmyadmin", "adminer", "grafana", "kibana",
@@ -77,34 +85,65 @@ class Triage:
     """Pasif recon-çıktısı analizi."""
 
     def analyze_dir(self, session_dir: str) -> Dict[str, Any]:
-        """Bir recon oturum dizinini (urls.txt + httpx.jsonl) analiz eder."""
-        urls = self._read_lines(os.path.join(session_dir, "urls.txt"))
-        # urls.txt boşsa livehosts'u da dene (en azından host bazlı)
+        """Bir recon oturum dizinini analiz eder. Dosya adları `artifacts.read_path` ile
+        çözülür — yeni açıklayıcı ad (05_urller.txt…) yoksa eski ada (urls.txt) düşer,
+        böylece eski recon dizinleri de çalışmaya devam eder (geriye-uyumluluk)."""
+        urls = self._read_lines(artifacts.read_path(session_dir, "urls"))
+        # urls yoksa canlı host listesini de dene (en azından host bazlı)
         if not urls:
-            urls = self._read_lines(os.path.join(session_dir, "livehosts.txt"))
-        hosts = self._read_jsonl(os.path.join(session_dir, "httpx.jsonl"))
-        api_targets = self._read_json_list(os.path.join(session_dir, "api_schema_targets.json"))
+            urls = self._read_lines(artifacts.read_path(session_dir, "livehosts"))
+        hosts = self._read_jsonl(artifacts.read_path(session_dir, "httpx"))
+        api_targets = self._read_json_list(artifacts.read_path(session_dir, "api_schema"))
         return self.analyze(urls, hosts, api_targets)
 
     def analyze(self, urls: List[str], httpx_hosts: Optional[List[Dict]] = None,
                api_schema_targets: Optional[List[Dict]] = None) -> Dict[str, Any]:
         param_targets = self._param_targets(urls)
         interesting = self._interesting_urls(urls)
+        api_endpoints = self._api_endpoints(urls)
         tech = self._tech_flags(httpx_hosts or [])
         api_schema_targets = api_schema_targets or []
         return {
             "param_targets": param_targets,
             "interesting_urls": interesting,
+            "api_endpoints": api_endpoints,
             "tech": tech,
             "api_schema_targets": api_schema_targets,
             "stats": {
                 "urls": len(urls),
                 "param_endpoints": len(param_targets),
                 "interesting": len(interesting),
+                "api_endpoints": len(api_endpoints),
                 "tech_flags": len(tech),
                 "api_schema_endpoints": len(api_schema_targets),
             },
         }
+
+    # ── Path-tabanlı API endpoint'leri (API-probe hedefleri) ──────────────────
+    def _api_endpoints(self, urls: List[str]) -> List[Dict[str, str]]:
+        """Query'siz, path-tabanlı REST/API endpoint'lerini çıkarır (metot/yetki haritası
+        + OOB SSRF probu için). `_param_targets`'ten farkı: burada query parametresi
+        aranmaz — endpoint'in kendisi (path) hedeftir. host+path bazında tekilleştirilir."""
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for u in urls:
+            u = u.replace("&amp;", "&")
+            try:
+                pr = urlparse(u)
+            except (ValueError, TypeError):
+                continue
+            path = pr.path or ""
+            if _STATIC_ASSET_RE.search(path):      # statik varlık → API değil
+                continue
+            if not _API_PATH_RE.search(path):
+                continue
+            key = (pr.hostname or "", path.rstrip("/") or "/")
+            if key in seen:
+                continue
+            seen.add(key)
+            base = pr._replace(query="", fragment="").geturl()
+            out.append({"url": base, "path": path})
+        return out
 
     # ── Parametreli URL'ler → vuln sınıf adayları (fuzzer hedefleri) ──────────
     def _param_targets(self, urls: List[str]) -> List[Dict[str, Any]]:
