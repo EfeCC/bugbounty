@@ -16,7 +16,7 @@ from rich.table import Table
 
 from bugtool.webrecon import WebRecon
 from bugtool.monitor import AssetMonitor
-from bugtool.scope import ScopeChecker
+from bugtool.scope import ScopeChecker, auto_scope_entry, host_only
 from bugtool.triage import Triage
 from bugtool import artifacts
 from bugtool.fuzzer import ParamFuzzer
@@ -63,13 +63,24 @@ def load_config() -> dict:
     return cfg
 
 
-def _scope_checker(config: dict) -> ScopeChecker:
+def _scope_checker(config: dict, extra_allowed=None) -> ScopeChecker:
+    """Scope kontrolcüsü kurar. `extra_allowed` = hedeften OTOMATİK türetilen izin
+    girdileri (ör. `*.staging.gitsec.io` ya da test edilecek endpoint host'ları).
+
+    `scope.auto_from_target` (varsayılan True) açıkken bu otomatik girdiler config'in
+    `allowed_targets`'ına EKLENİR — böylece her yeni site için scope.txt'i elle
+    değiştirmek gerekmez. scope.txt yine okunur: `excluded_targets`/`!` girdileri HER
+    ZAMAN önce kontrol edilir ve otomatik izni EZER (carve-out korunur). Flag False ise
+    otomatik girdiler yok sayılır → eski katı davranış (yalnızca scope.txt/allowed)."""
     sc = config.get("scope", {}) or {}
     scope_file = sc.get("scope_file")
     if scope_file and not os.path.isabs(scope_file):
         scope_file = os.path.join(os.path.dirname(__file__), scope_file)
+    allowed = list(sc.get("allowed_targets", []) or [])
+    if sc.get("auto_from_target", True) and extra_allowed:
+        allowed += [e for e in extra_allowed if e]
     return ScopeChecker(scope_file=scope_file,
-                        allowed=sc.get("allowed_targets", []),
+                        allowed=allowed,
                         excluded=sc.get("excluded_targets", []))
 
 
@@ -78,10 +89,15 @@ def _run_webrecon(target: str, config: dict, output_dir: str, passive: bool = No
     wr = WebRecon.from_config(config)
     if passive is not None:
         wr.passive_only = passive
-    checker = _scope_checker(config)
+    # Hedefi OTOMATİK scope'a ekle: `*.<host>` — hem hedefi yetkiler hem recon'un bulduğu
+    # subdomain URL'lerini scope-içi sayar. scope.txt'in `!exclusion`'ları yine önce
+    # kontrol edilir; hedef bir exclusion'a takılırsa aşağıdaki is_in_scope False döner.
+    checker = _scope_checker(config, extra_allowed=[auto_scope_entry(target)])
     if not checker.is_in_scope(target):
         raise click.ClickException(
-            f"KAPSAM DIŞI: {target} — scope.txt / config.yaml → scope bölümünü kontrol edin.")
+            f"KAPSAM DIŞI: {target} — scope.txt'te `!` ile hariç tutulmuş görünüyor "
+            f"(ya da scope.auto_from_target=false ve scope.txt'te yok). "
+            f"config.yaml → scope bölümünü kontrol edin.")
     return wr.run_pipeline(target, output_dir=output_dir, scope_checker=checker.is_in_scope,
                            reporter=reporter)
 
@@ -398,29 +414,47 @@ def _render_api_probe(api_res: dict, sent: int):
     console.print(table)
 
 
+def _endpoint_hosts(param_targets: list, api_endpoints: list) -> list:
+    """Aktif testte istek atılacak DISTINCT host'ları toplar (otomatik scope girdisi).
+    Bu host'lar recon'un `*.<hedef>` filtresinden geçmiştir (hepsi hedefin altında),
+    dolayısıyla onları izinli saymak = 'yazdığın hedefi test et' demektir."""
+    hosts: list = []
+    seen = set()
+    for t in list(param_targets) + list(api_endpoints):
+        h = host_only(t.get("url", "")) if isinstance(t, dict) else ""
+        if h and h not in seen:
+            seen.add(h)
+            hosts.append(h)
+    return hosts
+
+
 def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: str = ""):
     """Aktif test (opt-in): query-param fuzzing + path-tabanlı API-probe (metot/yetki +
     kör SSRF OOB). POTANSİYEL bulguları kaydeder.
 
-    GÜVENLİK: gerçek bir kapsam (scope.txt dolu VEYA allowed_targets) yoksa SERT DURUR —
-    hiç istek atmaz. Eskiden yalnızca sarı uyarı basıp devam ediyordu; taze kurulumda
-    scope.txt henüz yokken aktif test fiilen kapsamsız çalışabiliyordu."""
-    checker = _scope_checker(config)
-    if not checker.has_real_scope():
-        console.print(Panel(
-            "[bold red]❌ AKTİF TEST DURDURULDU[/bold red]\n"
-            "Gerçek bir kapsam tanımı yok: scope.txt yok/boş ve config.yaml → "
-            "scope.allowed_targets de boş.\n"
-            "[dim]Önce program kapsamını scope.txt'ye ekle (satır formatı: `example.com` / "
-            "`*.example.com` izinli, `!admin.example.com` yasak) ya da config.yaml → "
-            "scope.allowed_targets'ı doldur, sonra tekrar dene.[/dim]",
-            border_style="red"))
-        return
-
+    GÜVENLİK: `scope.auto_from_target` (varsayılan True) açıkken test edilecek endpoint
+    host'ları OTOMATİK izinli sayılır (recon'un `*.<hedef>` filtresinden geçmiş host'lar) —
+    scope.txt'i elle doldurmadan hedefe-özel yetkilenir. Flag False VE scope.txt/allowed
+    boşsa SERT DURUR, hiç istek atmaz. scope.txt'in `!exclusion`'ları her iki modda da
+    önce kontrol edilir ve otomatik izni EZER."""
     param_targets = result.get("param_targets") or []
     api_endpoints = result.get("api_endpoints") or []
     if not param_targets and not api_endpoints:
         console.print("[dim]  Aktif test için parametreli endpoint / API endpoint yok — atlandı.[/dim]")
+        return
+
+    # OTOMATİK scope: istek atılacak host'ları izinli say (auto_from_target açıksa).
+    endpoint_hosts = _endpoint_hosts(param_targets, api_endpoints)
+    checker = _scope_checker(config, extra_allowed=endpoint_hosts)
+    if not checker.has_real_scope():
+        console.print(Panel(
+            "[bold red]❌ AKTİF TEST DURDURULDU[/bold red]\n"
+            "Kapsam belirlenemedi: scope.auto_from_target=false VE scope.txt yok/boş "
+            "VE config.yaml → scope.allowed_targets de boş.\n"
+            "[dim]Ya scope.auto_from_target'ı açık bırak (hedef otomatik yetkilenir), "
+            "ya da program kapsamını scope.txt'ye ekle (satır formatı: `example.com` / "
+            "`*.example.com` izinli, `!admin.example.com` yasak), sonra tekrar dene.[/dim]",
+            border_style="red"))
         return
 
     fuzzer = ParamFuzzer.from_config(config, scope_checker=checker.is_in_scope)

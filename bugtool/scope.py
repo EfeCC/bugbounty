@@ -23,6 +23,17 @@ def host_only(value: str) -> str:
     return v.rstrip(".")
 
 
+def auto_scope_entry(target: str) -> str:
+    """Hedeften otomatik scope girdisi türetir: `*.<host>`.
+
+    Recon (`subfinder -d <host>`) yalnızca bu host'un ALTINI tarar, o yüzden `*.<host>`
+    hem host'un kendisini (target_matches'te `t == base`) hem tüm subdomain'lerini
+    kapsar — tek girdi yeter. scheme/port/path `host_only` ile kırpılır. Host çıkmazsa
+    boş string döner (çağıran tarafın eklememesi için)."""
+    h = host_only(target)
+    return ("*." + h) if h else ""
+
+
 def target_matches(target: str, scope_entry: str) -> bool:
     """Hedefin bir scope girdisiyle eşleşip eşleşmediğini kontrol eder.
     Destekler: birebir string, CIDR (IP aralığı), domain wildcard (`*.example.com`)."""

@@ -2,7 +2,8 @@
 
 import pytest
 
-from bugtool.scope import ScopeChecker, host_only, load_scope_file, target_matches
+from bugtool.scope import (ScopeChecker, auto_scope_entry, host_only,
+                           load_scope_file, target_matches)
 
 
 def test_has_real_scope():
@@ -87,3 +88,29 @@ def test_scope_checker_allowed_and_excluded(tmp_path):
 def test_scope_checker_no_scope_means_open():
     checker = ScopeChecker()
     assert checker.is_in_scope("anything.com") is True
+
+
+# ── Otomatik scope (hedeften türetme) ────────────────────────────────────────
+def test_auto_scope_entry_derives_wildcard():
+    assert auto_scope_entry("https://staging.dashboard.gitsec.io/x") == "*.staging.dashboard.gitsec.io"
+    assert auto_scope_entry("example.com") == "*.example.com"
+    assert auto_scope_entry("api.example.com:8443") == "*.api.example.com"
+    assert auto_scope_entry("") == ""
+
+
+def test_auto_scope_entry_covers_host_and_subdomains():
+    # `*.<host>` hem host'un kendisini hem subdomain'lerini kapsamalı (tek girdi yeter).
+    e = auto_scope_entry("staging.gitsec.io")
+    checker = ScopeChecker(allowed=[e])
+    assert checker.is_in_scope("staging.gitsec.io") is True          # host'un kendisi
+    assert checker.is_in_scope("api.staging.gitsec.io") is True      # subdomain
+    assert checker.is_in_scope("gitsec.io") is False                 # üst apex kapsam dışı
+    assert checker.is_in_scope("www.gitsec.io") is False             # kardeş (WP marketing) kapsam dışı
+
+
+def test_auto_scope_exclusion_still_wins():
+    # scope.txt'te `!` ile hariç tutulan host, hedeften otomatik izinli olsa bile yasak.
+    checker = ScopeChecker(allowed=[auto_scope_entry("staging.gitsec.io")],
+                           excluded=["admin.staging.gitsec.io"])
+    assert checker.is_in_scope("api.staging.gitsec.io") is True
+    assert checker.is_in_scope("admin.staging.gitsec.io") is False   # exclusion otomatik izni ezer

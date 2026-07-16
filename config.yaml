@@ -7,7 +7,7 @@
 # Çakışma varsa Go binary'sinin TAM YOLUNU buraya yaz; boş = PATH'ten ara.
 # `which -a httpx` ile hangi httpx'lerin kurulu olduğunu görebilirsin.
 binaries:
-  httpx: "/usr/bin/httpx-toolkit"   # Kali: apt httpx-toolkit = ProjectDiscovery Go sürümü
+  httpx: "/home/efe/go/bin/httpx"   # Kali: apt httpx-toolkit = ProjectDiscovery Go sürümü
                                     # /usr/bin/httpx Python CLI'dır, YANLIŞ — kullanma!
   # subfinder: ""
   # dnsx: ""
@@ -20,11 +20,19 @@ binaries:
 # ── Kapsam (Scope) ─────────────────────────────────────────
 # Domain wildcard desteklenir: `*.example.com` → apex + tüm subdomain eşleşir.
 scope:
-  # Sadece bunlar taranabilir (boşsa tüm hedefler geçerli)
+  # OTOMATİK KAPSAM: yazdığın hedef (hunt/recon/triage --active) o çalışma için
+  # otomatik izinli sayılır (`*.<hedef-host>`). Böylece her yeni site için scope.txt'i
+  # elle değiştirmen gerekmez — X'e test yaptıktan sonra Y'ye geçmek için dosyaya
+  # dokunmazsın. GÜVENLİK: aşağıdaki `excluded_targets` ve scope.txt'teki `!` girdileri
+  # HER ZAMAN önce kontrol edilir ve otomatik izni EZER (carve-out korunur).
+  # false yaparsan eski katı davranış: yalnızca scope.txt/allowed_targets taranabilir.
+  auto_from_target: true
+  # Sadece bunlar taranabilir (otomatik kapsama EK olarak; boş bırakabilirsin)
   allowed_targets: []
-  # Bu hedefler ASLA taranmaz
+  # Bu hedefler ASLA taranmaz (otomatik izni de ezer)
   excluded_targets: []
-  # Bug bounty program scope'unu harici dosyadan yükle (bu dosyayı düzenlemeden).
+  # Program scope'unu harici dosyadan yükle. auto_from_target açıkken bu dosya OPSİYONEL:
+  # sadece belirli host'ları kısıtlamak/hariç tutmak (`!admin.example.com`) istersen doldur.
   # Satır formatı: `example.com` / `*.example.com` = izinli; `!admin.example.com` = yasak.
   scope_file: "scope.txt"
 
@@ -69,7 +77,17 @@ webrecon:
   # DÜZELTME: nuclei filtresiz kurulu template repo'sunun TAMAMINI (binlerce şablon —
   # `nuclei -tl` ile kaç tane kurulu olduğunu görebilirsin) her host'a karşı deniyordu,
   # tek host'ta bile nuclei_timeout'a çarpıp taramanın yarım kesilmesine sebep oluyordu.
-  nuclei_auto_scan: true       # -as: httpx'in tespit ettiği teknolojiye göre sadece ilgili şablonları seç
+  # Çözüm: varsayılan olarak tech-BAĞIMSIZ yüksek-değerli şablon setini çalıştır (aşağıda).
+  nuclei_auto_scan: false      # -as: SADECE tespit edilen teknolojiye göre şablon seç. Modern
+                               # SPA/API'lerde tech tespiti zayıf → neredeyse hiç şablon çalışmaz,
+                               # o yüzden varsayılan KAPALI. WordPress/Jira gibi tech'i belli
+                               # hedeflerde açmak isteyebilirsin.
+  # Hangi şablonlar çalışsın (virgülle ayrık, `-t` değerleri). Boş bırakırsan TAM tarama
+  # (binlerce şablon, yavaş). Varsayılan set: ifşa dosyalar/misconfig/default-login/açık
+  # panel/takeover/genel-zafiyet — stack'ten bağımsız, en yüksek sinyal (~2300 şablon).
+  # CVE'ler (çoğu ürün-spesifik) bilerek dışarıda; belirli bir ürünü hedefliyorsan
+  # "http/cves/" ekleyebilirsin.
+  nuclei_templates: "http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/takeovers/,http/vulnerabilities/,dns/,ssl/"
   nuclei_exclude_tags: "dos,fuzz,intrusive"   # yavaş/riskli kategorileri hariç tut (VDP "no disruption" uyumlu)
 
 # ── Monitor (yeni-asset takibi) ────────────────────────────
@@ -99,3 +117,9 @@ fuzz:
   ladder_rounds: 2             # her doz kaç tur ölçülsün (medyan alınır; artırınca daha sağlam/yavaş)
   # WAF-bypass: kanonik payload WAF'a takılınca (pozitif kontrol) denenecek mutasyon sayısı
   waf_mutations_cap: 6         # sqli/ssti'de encode/yorum/case varyantlarıyla atlatmayı dene
+  # ── Path-tabanlı API-probe (query'siz REST endpoint'leri: /api/...) ──
+  # --active'de query-param fuzzer'ına EK olarak çalışır. Metot/yetki haritası SADECE
+  # OPTIONS+GET (okuma, non-destructive). api_oob_post: bağlantı-test edici (test-connection/
+  # callback/oauth/webhook) + yıkıcı-OLMAYAN endpoint'lere JSON body ile kör SSRF probu da
+  # gönderilsin mi (yalnızca --oob verildiğinde). false = sadece GET-query OOB probu.
+  api_oob_post: true
