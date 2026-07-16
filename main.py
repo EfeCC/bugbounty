@@ -331,7 +331,10 @@ def _render_triage(result: dict):
         console.print("\n[bold yellow]🎯 Parametreli Endpoint'ler (aday vuln sınıfı):[/bold yellow]")
         for pt in result["param_targets"][:40]:
             for name, classes in pt["params"].items():
-                tag = ", ".join(classes) if classes else "genel"
+                # İpucu eşleşmeyen parametre yine de aktif testte varsayılan (ucuz+yüksek
+                # değerli) xss/sqli/redirect ile denenir — "genel" yerine bunu göster ki
+                # kullanıcı "bundan ne çıkar?" diye sormasın.
+                tag = ", ".join(classes) if classes else "varsayılan: xss/sqli/redirect"
                 console.print(f"  • {name} → ({tag})  {pt['url'][:90]}")
     if result.get("api_schema_targets"):
         body_count = sum(1 for t in result["api_schema_targets"] if t.get("body_params"))

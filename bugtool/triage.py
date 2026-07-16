@@ -35,6 +35,22 @@ _INTERESTING_PATH_RE = re.compile(
     r"jenkins|gitlab|phpmyadmin|adminer|\.well-known|upload|uploads|internal|"
     r"metrics|health|jmx-console|struts|cgi-bin)(?:/|$|\?)", re.I)
 
+# ── Statik varlık uzantıları (FALSE-POSITIVE filtresi) ───────────────────────
+# Bir .css/.js/font/resim dosyası enjeksiyon hedefi DEĞİLDİR: üzerindeki `?ver=`/`?v=`
+# gibi cache-buster parametreleri sadece gürültü üretir (ve --active'de statik dosyaya
+# boşuna xss/sqli/redirect isteği harcatır). Bu uzantılar hem parametreli-endpoint
+# adaylarından hem de "ilginç path" işaretlemesinden (ör. /wp-content/uploads/x.css)
+# elenir. Yol (path) üzerinde çalışır — query'deki tesadüfi ".js" ile eşleşmesin diye.
+_STATIC_ASSET_RE = re.compile(
+    r"\.(?:css|js|mjs|map|woff2?|ttf|otf|eot|"
+    r"png|jpe?g|gif|svg|webp|ico|bmp|avif|"
+    r"mp4|webm|mp3|wav|ogg|avi|mov)$", re.I)
+
+# Cache-buster / sürüm parametreleri — hiçbir vuln sınıfına aday değil, yalnızca gürültü.
+# (Statik olmayan bir endpoint üzerinde görülseler bile enjekte edilebilir değiller.)
+_CACHEBUSTER_PARAMS = {"ver", "version", "v", "cache", "cachebuster", "cb",
+                       "nocache", "rev", "revision", "_"}
+
 # İlginç/versiyonlu teknoloji sinyalleri (httpx tech alanı)
 _TECH_FLAGS = ["wordpress", "joomla", "drupal", "jira", "confluence", "jenkins", "gitlab",
                "tomcat", "struts", "spring", "phpmyadmin", "adminer", "grafana", "kibana",
@@ -95,13 +111,23 @@ class Triage:
         seen_templates = set()
         out: List[Dict[str, Any]] = []
         for u in urls:
+            # `&amp;` HTML-entity artefaktı (gau/katana URL'leri HTML'den söktüğü için
+            # `x=1&amp;y=2` gibi gelir) → gerçek `&`. Aksi halde parse_qs `amp;y` gibi
+            # anlamsız parametre adları üretir. URL'nin kendisini normalize ediyoruz ki
+            # ekranda ve (aktif testte) fuzzer'ın kurduğu istekte de tutarlı olsun.
+            u = u.replace("&amp;", "&")
             try:
                 pr = urlparse(u)
             except (ValueError, TypeError):
                 continue
             if not pr.query:
                 continue
+            # Statik varlık (.css/.js/font/resim) → enjeksiyon hedefi değil, atla.
+            if _STATIC_ASSET_RE.search(pr.path or ""):
+                continue
             params = list(parse_qs(pr.query, keep_blank_values=True).keys())
+            # Cache-buster/sürüm parametrelerini ele — hiçbir vuln sınıfına aday değiller.
+            params = [p for p in params if p.lower() not in _CACHEBUSTER_PARAMS]
             if not params:
                 continue
             # Aynı endpoint şablonunu (host+path+param-adları) bir kez al → istek şişmesini önle
@@ -121,7 +147,9 @@ class Triage:
             reason = None
             if _SENSITIVE_FILE_RE.search(u):
                 reason = "İfşa/hassas dosya (config/backup/secret)"
-            elif _INTERESTING_PATH_RE.search(u):
+            elif _INTERESTING_PATH_RE.search(u) and not _STATIC_ASSET_RE.search(urlparse(u).path or ""):
+                # "İlginç path" statik bir dosyaya işaret ediyorsa (ör. /wp-content/uploads/
+                # x.css veya /api/static/chunks/y.js) bu bir endpoint değil, varlıktır — atla.
                 reason = "İlginç endpoint (admin/api/graphql/actuator…)"
             if reason:
                 key = urlparse(u)._replace(query="").geturl()
