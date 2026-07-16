@@ -66,6 +66,11 @@ webrecon:
   katana_crawl_duration: 300   # toplam crawl süresi limiti (sn) — 5dk. Eskiden sınırsız + 600sn timeout'a sığmıyordu
   # Zafiyet taraması (nuclei) — template tabanlı otomatik zaf. tespiti
   nuclei_timeout: 1200         # nuclei için AYRI timeout (sn) — 20dk. Eskiden global 600sn → büyük hedeflerde patıyordu
+  # DÜZELTME: nuclei filtresiz kurulu template repo'sunun TAMAMINI (binlerce şablon —
+  # `nuclei -tl` ile kaç tane kurulu olduğunu görebilirsin) her host'a karşı deniyordu,
+  # tek host'ta bile nuclei_timeout'a çarpıp taramanın yarım kesilmesine sebep oluyordu.
+  nuclei_auto_scan: true       # -as: httpx'in tespit ettiği teknolojiye göre sadece ilgili şablonları seç
+  nuclei_exclude_tags: "dos,fuzz,intrusive"   # yavaş/riskli kategorileri hariç tut (VDP "no disruption" uyumlu)
 
 # ── Monitor (yeni-asset takibi) ────────────────────────────
 monitor:

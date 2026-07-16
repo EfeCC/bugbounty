@@ -53,6 +53,8 @@ class WebRecon:
                  ffuf_timeout: int = 120,
                  katana_max_hosts: int = 15, katana_crawl_duration: int = 300,
                  nuclei_timeout: int = 1200,
+                 nuclei_auto_scan: bool = True,
+                 nuclei_exclude_tags: str = "dos,fuzz,intrusive",
                  secrets_max_files: int = 40, apischema_max_hosts: int = 15,
                  probe_timeout: int = 8, probe_concurrency: int = 20):
         self.passive_only = passive_only
@@ -69,6 +71,14 @@ class WebRecon:
         self.katana_max_hosts = katana_max_hosts
         self.katana_crawl_duration = katana_crawl_duration
         self.nuclei_timeout = nuclei_timeout
+        # DÜZELTME: nuclei filtresiz binlerce şablonu (kurulu template repo'sunun TAMAMI)
+        # her host'a karşı deniyordu → tek host'ta bile nuclei_timeout'a çarpıp yarım
+        # kesiliyordu. `-as` httpx'in tespit ettiği teknolojiye göre sadece ilgili
+        # şablonları seçer (wappalyzer tag-mapping); `-etags` ile de yavaş/riskli
+        # (dos/fuzz/intrusive) kategoriler hariç tutulur — VDP'nin "no disruption"
+        # kuralına da uygun.
+        self.nuclei_auto_scan = nuclei_auto_scan
+        self.nuclei_exclude_tags = nuclei_exclude_tags
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
         # Per-host prob (git/cors/secret/apischema): KISA istek-timeout'u (self.timeout=600
@@ -94,6 +104,8 @@ class WebRecon:
             katana_max_hosts=int(wc.get("katana_max_hosts", 15)),
             katana_crawl_duration=int(wc.get("katana_crawl_duration", 300)),
             nuclei_timeout=int(wc.get("nuclei_timeout", 1200)),
+            nuclei_auto_scan=bool(wc.get("nuclei_auto_scan", True)),
+            nuclei_exclude_tags=str(wc.get("nuclei_exclude_tags", "dos,fuzz,intrusive") or ""),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
             probe_timeout=int(wc.get("probe_timeout", 8)),
@@ -519,6 +531,13 @@ class WebRecon:
                                 f"max {self.nuclei_timeout // 60}dk)"):
                 cmd = (f"nuclei -l {live_file} -jsonl -silent -severity {self.nuclei_severity} "
                        f"-rl {self.rate_limit} -c {self.concurrency} -timeout 10")
+                if self.nuclei_auto_scan:
+                    # Kurulu template repo'sunun TAMAMINI (binlerce şablon) her host'a
+                    # karşı denemek yerine, httpx'in bulduğu teknolojiye göre yalnızca
+                    # ilgili şablonları seçer — asıl yavaşlığın sebebi buydu.
+                    cmd += " -as"
+                if self.nuclei_exclude_tags:
+                    cmd += f" -etags {self.nuclei_exclude_tags}"
                 r = run(cmd, timeout=self.nuclei_timeout)
                 self._write_raw(os.path.join(output_dir, "nuclei.jsonl"), r["stdout"])
                 nuclei_findings = self._parse_nuclei(r["stdout"])
