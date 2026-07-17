@@ -11,11 +11,18 @@ metodolojisiyle doğrulandı):
   1. Rastgele/sahte bir Origin gönder → ACAO bu origin'i BİREBİR yansıtıyor mu?
   2. `Origin: null` gönder → ACAO `null` mu dönüyor? (sandboxed iframe/`data:` URL
      saldırı vektörü için kullanılabilir)
-  İkisinde de: `Access-Control-Allow-Credentials: true` de EKLENMİŞSE önem YÜKSEK
-  (tarayıcı credential'lı cevabı gerçekten işler); yoksa DÜŞÜK/ORTA (tarayıcı
-  credential'sız cevabı script'e açar ama zaten kimliğe özel olmayan veri döner).
-  `Access-Control-Allow-Origin: *` + credentials:true kombinasyonu tarayıcı
-  seviyesinde zaten engellenir, o yüzden ayrıca test edilmiyor.
+  Bulgu YALNIZCA reflection'a EK OLARAK `Access-Control-Allow-Credentials: true` de
+  dönüyorsa üretilir (severity=high). Gerekçe: credential yansıması olmadan bir
+  saldırgan endpoint'i sadece credential'SIZ okuyabilir — bu da internetteki herkesin
+  zaten görebildiği public cevaptır, ek etki yoktur. Bu yüzden "origin/null yansıyor
+  ama ACAC yok" TEK BAŞINA RAPORLANMAZ; aksi halde `null`'ı jenerik yansıtan her CDN
+  edge'i (ör. Akamai preflight) false-positive üretir. `Access-Control-Allow-Origin: *`
+  + credentials:true kombinasyonu tarayıcı seviyesinde zaten engellenir, o yüzden
+  ayrıca test edilmiyor.
+
+  İSTİSNA (bilerek kapsanmıyor): erişimi ağ konumuyla (IP/intranet/VPN) kısıtlanmış bir
+  kaynakta credential'sız reflection da hassas veri sızdırabilir; tarayıcı bunu otomatik
+  ayırt edemediğinden burada ele alınmıyor — böyle bir hedefi elle değerlendir.
 
 Tamamen pasif/düşük-riskli: host başına 1-2 GET isteği, hiçbir payload/enjeksiyon
 yok — sadece bir HTTP header'ı değiştirip cevabı okumak. --active gerektirmez.
@@ -34,26 +41,28 @@ def _random_origin() -> str:
     return f"https://bgtl-{marker}.example"
 
 
-def _finding(base_url: str, mode: str, acao: str, creds: bool) -> Dict[str, Any]:
-    severity = "high" if creds else "medium"
-    impact = (" VE Access-Control-Allow-Credentials: true dönüyor — herhangi bir "
-             "site, oturum açmış kullanıcı adına kimlik bilgili istek atabilir."
-             if creds else " (Access-Control-Allow-Credentials yok/false — risk daha düşük, "
-                          "ama yine de gereksiz bir izin genişletmesi).")
+def _finding(base_url: str, mode: str, acao: str) -> Dict[str, Any]:
+    """Yalnızca reflection + `Access-Control-Allow-Credentials: true` BİRLİKTE
+    doğrulandığında üretilir (bkz. _check_one) — gerçekten sömürülebilir CORS misconfig.
+    Credential yansıması olmadan reflection etkisiz sayılır ve bulgu ÜRETİLMEZ."""
+    vector = ("sandboxed iframe / `data:` URL (origin=null)" if mode == "null"
+              else "herhangi bir kötü niyetli origin")
     return {
-        "title": f"CORS Yanlış Yapılandırma: {urlparse(base_url).hostname} ({mode} origin)",
-        "severity": severity,
-        "description": f"{base_url}, gönderilen '{mode}' origin'i "
-                       f"Access-Control-Allow-Origin: {acao} olarak yansıtıyor{impact}",
-        "evidence": f"Access-Control-Allow-Origin: {acao}"
-                   + (", Access-Control-Allow-Credentials: true" if creds else ""),
-        "reproduction": f'curl -i -H "Origin: {mode if mode == "null" else "https://ATTACKER.example"}" {base_url}',
-        "cvss": 8.1 if creds else 5.0,
+        "title": f"CORS Yanlış Yapılandırma: {urlparse(base_url).hostname} "
+                 f"({mode} origin + credentials)",
+        "severity": "high",
+        "description": f"{base_url}, gönderilen '{mode}' origin'ini "
+                       f"Access-Control-Allow-Origin: {acao} olarak yansıtıyor VE "
+                       f"Access-Control-Allow-Credentials: true dönüyor — {vector} üzerinden, "
+                       f"oturum açmış bir kullanıcının kimlik bilgileriyle bu endpoint'e istek "
+                       f"atıp cevabı okuyabilir.",
+        "evidence": f"Access-Control-Allow-Origin: {acao}, Access-Control-Allow-Credentials: true",
+        "reproduction": f'curl -i -H "Origin: {"null" if mode == "null" else "https://ATTACKER.example"}" {base_url}',
+        "cvss": 8.1,
         "class": "cors_misconfig",
         "status": "unverified",
-        "note": "POTANSİYEL — özellikle credentials=false ise gerçek etkiyi (bu "
-                "endpoint'in hassas/kimliğe-özel veri döndürüp döndürmediğini) elle "
-                "doğrula; statik/herkese-açık bir sayfada CORS'un pratik önemi azdır.",
+        "note": "POTANSİYEL — bu endpoint'in gerçekten kimliğe-özel/hassas veri döndürdüğünü "
+                "elle doğrula; statik/herkese-açık bir cevapta CORS'un pratik etkisi azdır.",
     }
 
 
@@ -65,26 +74,30 @@ def _check_one(base_url: str, timeout: int) -> List[Dict[str, Any]]:
     base = base_url.rstrip("/")
     found: List[Dict[str, Any]] = []
 
-    # Test 1: rastgele/sahte origin yansıtılıyor mu?
+    # Sömürülebilirlik için İKİSİ de şart: origin YANSIMASI + Access-Control-Allow-
+    # Credentials:true. Credential yansıması yoksa saldırgan yalnızca credential'SIZ
+    # (public) cevabı okuyabilir → gerçek etki yok, bulgu ÜRETME (false-positive kaynağı).
+
+    # Test 1: rastgele/sahte origin yansıyor + credential'lı mı?
     fake_origin = _random_origin()
     try:
         resp = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
                            headers={"User-Agent": _DEFAULT_UA, "Origin": fake_origin})
         acao = resp.headers.get("Access-Control-Allow-Origin", "")
-        if acao == fake_origin:
-            creds = resp.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
-            found.append(_finding(base, "rastgele", acao, creds))
+        creds = resp.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
+        if acao == fake_origin and creds:
+            found.append(_finding(base, "rastgele", acao))
     except Exception:
         pass
 
-    # Test 2: null origin whitelist'te mi?
+    # Test 2: null origin whitelist'te + credential'lı mı?
     try:
         resp2 = session.get(base, timeout=timeout, verify=False, allow_redirects=False,
                             headers={"User-Agent": _DEFAULT_UA, "Origin": "null"})
         acao2 = resp2.headers.get("Access-Control-Allow-Origin", "")
-        if acao2 == "null":
-            creds2 = resp2.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
-            found.append(_finding(base, "null", acao2, creds2))
+        creds2 = resp2.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
+        if acao2 == "null" and creds2:
+            found.append(_finding(base, "null", acao2))
     except Exception:
         pass
     return found

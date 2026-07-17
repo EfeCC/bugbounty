@@ -163,3 +163,24 @@ def test_cors_no_fp_when_not_reflected(monkeypatch):
                        lambda url, **kw: _Resp(headers={"Access-Control-Allow-Origin":
                                                         "https://trusted.example.com"}))
     assert cors_check.check(["https://api.example.com"]) == []
+
+
+def test_cors_no_fp_when_reflected_without_credentials(monkeypatch):
+    # Regresyon (trip.com false-positive): origin/null YANSIYOR ama
+    # Access-Control-Allow-Credentials YOK → saldırgan yalnızca public cevabı okur,
+    # gerçek etki yok → bulgu ÜRETİLMEMELİ. (Akamai CDN edge'inin jenerik davranışı.)
+    def handler(url, **kw):
+        origin = kw.get("headers", {}).get("Origin", "")
+        return _Resp(headers={"Access-Control-Allow-Origin": origin})  # ACAC yok
+    _patch_session_get(monkeypatch, handler)
+    assert cors_check.check(["https://pages.example.com"]) == []
+
+
+def test_cors_no_fp_when_null_reflected_credentials_false(monkeypatch):
+    # ACAC AÇIKÇA "false" olsa da bulgu üretilmemeli (yalnızca "true" sayılır).
+    def handler(url, **kw):
+        origin = kw.get("headers", {}).get("Origin", "")
+        return _Resp(headers={"Access-Control-Allow-Origin": origin,
+                              "Access-Control-Allow-Credentials": "false"})
+    _patch_session_get(monkeypatch, handler)
+    assert cors_check.check(["https://pages.example.com"]) == []
