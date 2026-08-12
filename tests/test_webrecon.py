@@ -247,6 +247,9 @@ def test_ctlogs_message_distinguishes_no_requests(monkeypatch, tmp_path):
         def error(self, msg):
             pass
 
+        def finding(self, f):
+            pass
+
     wr = WebRecon()
     wr.run_pipeline("example.com", output_dir=str(tmp_path), reporter=Rec())
     assert any("requests" in m and "kurulu değil" in m for k, m in events if k == "skip")
@@ -273,6 +276,9 @@ def test_ctlogs_message_when_requests_available_but_empty(monkeypatch, tmp_path)
             pass
 
         def error(self, msg):
+            pass
+
+        def finding(self, f):
             pass
 
     wr = WebRecon()
