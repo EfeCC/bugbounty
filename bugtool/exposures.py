@@ -232,10 +232,12 @@ def _check_one(base_url: str, timeout: int) -> List[Dict[str, Any]]:
 
 def check(live_hosts: List[str], max_hosts: int = 150, timeout: int = 8,
           concurrency: int = 20,
-          scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+          scope_checker: Optional[Callable[[str], bool]] = None,
+          on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """Her canlı host'ta yüksek-değerli ifşa/misconfig yollarını prob'lar. Host'lar PARALEL
-    kontrol edilir (çok subdomain'de saniyeler içinde biter). `requests` kurulu değilse ya da
-    hiç canlı host yoksa boş liste döner (graceful-degrade). `max_hosts <= 0` → cap yok (hepsi)."""
+    kontrol edilir (çok subdomain'de saniyeler içinde biter). `on_finding` verilirse her bulgu
+    BULUNDUĞU AN çağrılır (canlı çıktı). `requests` kurulu değilse ya da hiç canlı host yoksa
+    boş liste döner (graceful-degrade). `max_hosts <= 0` → cap yok (hepsi)."""
     if not live_hosts:
         return []
     try:
@@ -250,7 +252,8 @@ def check(live_hosts: List[str], max_hosts: int = 150, timeout: int = 8,
 
     targets = _scoped_targets(live_hosts, max_hosts, scope_checker)
     from .probe import parallel_collect
-    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency,
+                            on_result=on_finding)
 
 
 def _scoped_targets(live_hosts: List[str], max_hosts: int,

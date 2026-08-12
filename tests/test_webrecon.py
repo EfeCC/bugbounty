@@ -132,7 +132,10 @@ def test_ffuf_content_discovery(monkeypatch, tmp_path):
 
 def test_ffuf_skipped_without_wordlist(monkeypatch, tmp_path):
     _patch(monkeypatch)
-    wr = WebRecon()                            # wordlist yok (test ortamında SecLists yok)
+    # _find_wordlist'i boş döndür → ortamda SecLists/dirb KURULU olsa bile (ör. Kali) test
+    # deterministik kalsın: "wordlist bulunamazsa ffuf atlanır" davranışını izole test eder.
+    monkeypatch.setattr(WebRecon, "_find_wordlist", lambda self: "")
+    wr = WebRecon()
     p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
     assert "ffuf" in p["stages_skipped"]
 

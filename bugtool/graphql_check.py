@@ -77,9 +77,11 @@ def _check_one(url: str, timeout: int) -> List[Dict[str, Any]]:
 
 def check(live_hosts: List[str], urls: Optional[List[str]] = None, max_hosts: int = 120,
           timeout: int = 8, concurrency: int = 20,
-          scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+          scope_checker: Optional[Callable[[str], bool]] = None,
+          on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """Yaygın GraphQL yollarında (+ keşfedilen graphql URL'lerinde) introspection dener.
-    Aday URL'ler PARALEL kontrol edilir. `requests` yoksa boş liste döner (graceful-degrade)."""
+    Aday URL'ler PARALEL kontrol edilir. `on_finding` verilirse her bulgu BULUNDUĞU AN
+    çağrılır (canlı çıktı). `requests` yoksa boş liste döner (graceful-degrade)."""
     if not live_hosts and not urls:
         return []
     try:
@@ -133,4 +135,5 @@ def check(live_hosts: List[str], urls: Optional[List[str]] = None, max_hosts: in
         scoped.append(url)
 
     from .probe import parallel_collect
-    return parallel_collect(lambda u: _check_one(u, timeout), scoped, concurrency)
+    return parallel_collect(lambda u: _check_one(u, timeout), scoped, concurrency,
+                            on_result=on_finding)

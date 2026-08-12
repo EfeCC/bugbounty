@@ -105,10 +105,11 @@ def _check_one(base_url: str, timeout: int) -> List[Dict[str, Any]]:
 
 def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
          concurrency: int = 20,
-         scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+         scope_checker: Optional[Callable[[str], bool]] = None,
+         on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """Her canlı host'a sahte bir Origin ile istek atar, yansıma + credentials
-    kombinasyonunu kontrol eder. Host'lar PARALEL kontrol edilir. `requests` kurulu
-    değilse boş liste döner (graceful-degrade)."""
+    kombinasyonunu kontrol eder. Host'lar PARALEL kontrol edilir. `on_finding` verilirse
+    her bulgu BULUNDUĞU AN çağrılır (canlı çıktı). `requests` kurulu değilse boş döner."""
     if not live_hosts:
         return []
     try:
@@ -123,12 +124,14 @@ def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
 
     targets = _scoped_targets(live_hosts, max_hosts, scope_checker)
     from .probe import parallel_collect
-    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency,
+                            on_result=on_finding)
 
 
 def check_urls(urls: List[str], max_urls: int = 120, timeout: int = 8,
                concurrency: int = 20,
-               scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+               scope_checker: Optional[Callable[[str], bool]] = None,
+               on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """`check`'ten farkı: host kökü değil, VERİLEN TAM URL'leri (genelde `/api/...` veri
     endpoint'leri) test eder — asıl sömürülebilir CORS bunlardadır, host kökünde değil.
     URL bazında (host+path) dedup edilir (host bazında DEĞİL), böylece aynı host'un birden
@@ -166,7 +169,8 @@ def check_urls(urls: List[str], max_urls: int = 120, timeout: int = 8,
         targets.append(base)
 
     from .probe import parallel_collect
-    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency,
+                            on_result=on_finding)
 
 
 def _scoped_targets(live_hosts: List[str], max_hosts: int,

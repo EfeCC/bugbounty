@@ -363,7 +363,8 @@ class WebRecon:
         if self._stage_on("takeover") and have("dnsx"):
             with reporter.stage("Subdomain takeover kontrolü (dangling CNAME)"):
                 takeover_findings = takeover.check(subdomains, timeout=self.timeout,
-                                                   scope_checker=_in_scope)
+                                                   scope_checker=_in_scope,
+                                                   on_finding=reporter.finding)
                 findings.extend(takeover_findings)
             stages_run.append("takeover")
             if takeover_findings:
@@ -425,7 +426,8 @@ class WebRecon:
             with reporter.stage("Git deposu ifşası kontrolü (/.git/HEAD)"):
                 git_findings = git_check.check(
                     ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
-                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope,
+                    on_finding=reporter.finding)
                 findings.extend(git_findings)
             stages_run.append("gitcheck")
             if git_findings:
@@ -440,7 +442,8 @@ class WebRecon:
             with reporter.stage("CORS yanlış yapılandırma kontrolü"):
                 cors_findings = cors_check.check(
                     ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
-                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope,
+                    on_finding=reporter.finding)
                 findings.extend(cors_findings)
             stages_run.append("cors")
             if cors_findings:
@@ -459,7 +462,8 @@ class WebRecon:
             with reporter.stage("İfşa/yanlış-yapılandırma kontrolü (.env/actuator/phpinfo…)"):
                 exposure_findings = exposures.check(
                     ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
-                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope,
+                    on_finding=reporter.finding)
                 findings.extend(exposure_findings)
             stages_run.append("exposures")
             if exposure_findings:
@@ -586,7 +590,8 @@ class WebRecon:
             with reporter.stage("Secret/API-key taraması (JS dosyaları)"):
                 secret_findings = secrets_scan.scan(
                     urls, max_files=self.secrets_max_files, timeout=self.probe_timeout,
-                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope,
+                    on_finding=reporter.finding)
                 findings.extend(secret_findings)
             stages_run.append("secrets")
             if secret_findings:
@@ -631,7 +636,8 @@ class WebRecon:
                 with reporter.stage(f"CORS (API endpoint'leri, {len(api_urls)})"):
                     cors_ep_findings = cors_check.check_urls(
                         api_urls, max_urls=self.probe_max_hosts, timeout=self.probe_timeout,
-                        concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                        concurrency=self.probe_concurrency, scope_checker=_in_scope,
+                        on_finding=reporter.finding)
                     findings.extend(cors_ep_findings)
                 if cors_ep_findings:
                     reporter.done(f"{len(cors_ep_findings)} endpoint CORS bulgusu ⚠️")
@@ -646,7 +652,7 @@ class WebRecon:
                 gql_findings = graphql_check.check(
                     ranked_urls, urls, max_hosts=self.probe_max_hosts,
                     timeout=self.probe_timeout, concurrency=self.probe_concurrency,
-                    scope_checker=_in_scope)
+                    scope_checker=_in_scope, on_finding=reporter.finding)
                 findings.extend(gql_findings)
             stages_run.append("graphql")
             if gql_findings:
@@ -696,6 +702,8 @@ class WebRecon:
                 r = run(cmd, timeout=self.nuclei_timeout)
                 self._write_raw(artifacts.out_path(output_dir, "nuclei"), r["stdout"])
                 nuclei_findings = self._parse_nuclei(r["stdout"])
+                for nf in nuclei_findings:      # her nuclei bulgusunu da canlı bas
+                    reporter.finding(nf)
                 findings.extend(nuclei_findings)
             self._warn_if_failed(reporter, r, "nuclei")
             stages_run.append("nuclei")
@@ -709,6 +717,8 @@ class WebRecon:
         # index. Aktif test bu klasörü kullanırken hangi dosyanın ne içerdiği net olsun diye.
         self._write_summary(output_dir, target, domain, subdomains, live_hosts, urls,
                             endpoints, findings, api_targets, stages_run, stages_skipped)
+        # Bulguları kategoriye göre ayrı dosyalara yaz (reports/<oturum>/bulgular/<kategori>.jsonl)
+        artifacts.write_findings_files(output_dir, findings)
 
         return {
             "domain": domain,
@@ -757,6 +767,8 @@ class WebRecon:
                 "" if exists else " — (henüz yok)")
             lines.append(f"  {name:<28} — {desc}{mark}")
         lines += [
+            "  bulgular/<kategori>.jsonl    — bulgular TİPE göre ayrı dosyalarda "
+            "(secret_sizintisi/cors/ifsa_misconfig/git_ifsasi/takeover/graphql/idor…) + _TUMU.json",
             "  icerik_kesfi_<host>.json     — ffuf içerik keşfi (host başına)",
             "  katana_hedefleri.txt         — katana'ya verilen host listesi (ara dosya)",
             "  nuclei_hedefleri.txt         — nuclei'ye verilen önceliklendirilmiş host listesi (ara dosya)",

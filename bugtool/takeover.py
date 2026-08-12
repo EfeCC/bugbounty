@@ -118,7 +118,8 @@ def _finding(host: str, cname: str, service: Dict[str, Any], verified: bool,
 
 
 def check(subdomains: List[str], timeout: int = 600,
-         scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+         scope_checker: Optional[Callable[[str], bool]] = None,
+         on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """`subdomains` listesindeki her host için CNAME'e bakar, bilinen bir
     "sahiplenilebilir" servise işaret edenleri tek bir GET isteğiyle doğrulamaya
     çalışır. dnsx yoksa ya da hiçbir aday bulunmazsa boş liste döner (graceful).
@@ -129,6 +130,15 @@ def check(subdomains: List[str], timeout: int = 600,
     çözülmeyebilir (NXDOMAIN) — sadece "resolved" listesini kullansaydık tam da bu
     en klasik takeover durumunu kaçırırdık."""
     findings: List[Dict[str, Any]] = []
+
+    def _add(f):
+        findings.append(f)
+        if on_finding:
+            try:
+                on_finding(f)
+            except Exception:
+                pass
+
     if not subdomains or not have("dnsx"):
         return findings
 
@@ -171,9 +181,9 @@ def check(subdomains: List[str], timeout: int = 600,
         # düşük-güvenli bir sinyaldir, tamamen atmaktansa düşük güvenle bildirmek
         # daha iyi (kullanıcı elle kontrol edebilir).
         for host, cname, service in candidates:
-            findings.append(_finding(host, cname, service, verified=False,
-                                     evidence="CNAME eşleşti, HTTP doğrulaması yapılamadı "
-                                              "('requests' kurulu değil)"))
+            _add(_finding(host, cname, service, verified=False,
+                          evidence="CNAME eşleşti, HTTP doğrulaması yapılamadı "
+                                   "('requests' kurulu değil)"))
         return findings
 
     session = requests.Session()
@@ -188,8 +198,8 @@ def check(subdomains: List[str], timeout: int = 600,
             except Exception:
                 continue
         if body and service["fingerprint"].lower() in body.lower():
-            findings.append(_finding(host, cname, service, verified=True,
-                                     evidence=f"HTTP cevabında '{service['fingerprint']}' imzası bulundu"))
+            _add(_finding(host, cname, service, verified=True,
+                          evidence=f"HTTP cevabında '{service['fingerprint']}' imzası bulundu"))
         # imza bulunamadıysa bulgu ÜRETME — CNAME eşleşmesi tek başına yeterli
         # kanıt değil (kaynak muhtemelen hâlâ aktif/sahipli), burada eleniyor.
     return findings

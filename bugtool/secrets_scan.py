@@ -160,9 +160,19 @@ def _fetch_one(url: str, timeout: int, max_bytes: int):
         return []
 
 
-def _scan_content(url: str, content: str, seen_secrets: set, findings: List[Dict[str, Any]]):
+def _scan_content(url: str, content: str, seen_secrets: set, findings: List[Dict[str, Any]],
+                  on_finding=None):
     """İndirilen içeriği secret kalıplarına karşı tarar (sıralı — `seen_secrets` dedup'ı
-    deterministik kalsın diye ağdan sonra tek thread'de yapılır)."""
+    deterministik kalsın diye ağdan sonra tek thread'de yapılır). `on_finding` verilirse
+    her yeni bulgu BULUNDUĞU AN çağrılır (canlı çıktı)."""
+    def _add(f):
+        findings.append(f)
+        if on_finding:
+            try:
+                on_finding(f)
+            except Exception:
+                pass
+
     for name, pattern, severity, group_idx in PATTERNS:
         for m in pattern.finditer(content):
             value = m.group(group_idx) if group_idx else m.group(0)
@@ -173,7 +183,7 @@ def _scan_content(url: str, content: str, seen_secrets: set, findings: List[Dict
             if key in seen_secrets:
                 continue
             seen_secrets.add(key)
-            findings.append(_finding(url, name, masked, severity))
+            _add(_finding(url, name, masked, severity))
     for m in _GENERIC_RE.finditer(content):
         keyword, value = m.group(1), m.group(2)
         if _is_placeholder(value):
@@ -183,16 +193,18 @@ def _scan_content(url: str, content: str, seen_secrets: set, findings: List[Dict
         if key in seen_secrets:
             continue
         seen_secrets.add(key)
-        findings.append(_finding(url, f"Olası {keyword} (bağlamsal, servis-özel değil)",
-                                 masked, "medium"))
+        _add(_finding(url, f"Olası {keyword} (bağlamsal, servis-özel değil)",
+                      masked, "medium"))
 
 
 def scan(urls: List[str], max_files: int = 40, timeout: int = 8, max_bytes: int = 2_000_000,
          concurrency: int = 20,
-         scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+         scope_checker: Optional[Callable[[str], bool]] = None,
+         on_finding: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
     """`urls` içindeki JS dosyalarını (cap'li, dedup'lı, 3.taraf/CDN hariç) indirip
-    bilinen secret kalıplarıyla tarar. İNDİRME paralel, tarama+dedup sıralı. `requests`
-    kurulu değilse ya da hiç JS dosyası yoksa boş liste döner (graceful-degrade)."""
+    bilinen secret kalıplarıyla tarar. İNDİRME paralel, tarama+dedup sıralı. `on_finding`
+    verilirse her sızıntı BULUNDUĞU AN çağrılır (canlı çıktı). `requests` kurulu değilse ya da
+    hiç JS dosyası yoksa boş liste döner (graceful-degrade)."""
     js_urls = _select_js_urls(urls, max_files)
     if not js_urls:
         return []
@@ -224,5 +236,5 @@ def scan(urls: List[str], max_files: int = 40, timeout: int = 8, max_bytes: int 
     findings: List[Dict[str, Any]] = []
     seen_secrets: set = set()
     for url, content in fetched:
-        _scan_content(url, content, seen_secrets, findings)
+        _scan_content(url, content, seen_secrets, findings, on_finding=on_finding)
     return findings

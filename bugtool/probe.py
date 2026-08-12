@@ -13,15 +13,20 @@ listeyi önceden filtreler).
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 
 def parallel_collect(func: Callable[[Any], List[Any]], items: List[Any],
-                     concurrency: int = 20) -> List[Any]:
+                     concurrency: int = 20,
+                     on_result: Optional[Callable[[Any], None]] = None) -> List[Any]:
     """`func`'ı `items` üzerinde paralel çalıştırır ve döndürdüğü LİSTELERİ düzleştirip
     birleştirir. Her `func(item)` çağrısı 0+ öğeli bir liste dönmeli (tek host birden çok
     bulgu üretebilir; hiç üretmezse boş liste). `func` kendi exception'ını YUTMALI — bir
     prob patlarsa diğerleri sürsün, tüm tarama çökmesin.
+
+    `on_result(öğe)` verilirse her üretilen öğe İÇİN (host tamamlandıkça) ANA thread'den
+    çağrılır → bulguları BULUNDUĞU AN yüzeye çıkarmak için (canlı çıktı). `ex.map` sonuçları
+    gönderim sırasında verir, callback ana thread'de çalışır (console-print thread-safe).
 
     `concurrency <= 1` ise sıralı çalışır (test/deterministik davranış için)."""
     items = list(items)
@@ -29,11 +34,21 @@ def parallel_collect(func: Callable[[Any], List[Any]], items: List[Any],
         return []
     workers = max(1, min(int(concurrency), len(items)))
     out: List[Any] = []
+
+    def _emit(result):
+        for r in (result or []):
+            if on_result:
+                try:
+                    on_result(r)
+                except Exception:
+                    pass
+            out.append(r)
+
     if workers == 1:
         for item in items:
-            out.extend(func(item) or [])
+            _emit(func(item))
         return out
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for result in ex.map(func, items):
-            out.extend(result or [])
+            _emit(result)
     return out

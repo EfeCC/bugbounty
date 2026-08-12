@@ -33,6 +33,9 @@ class NullReporter:
     def error(self, msg):
         pass
 
+    def finding(self, f):
+        pass
+
 
 class ConsoleReporter:
     """rich tabanlı canlı raporlayıcı — CLI komutları kullanır."""
@@ -63,3 +66,18 @@ class ConsoleReporter:
     def error(self, msg):
         """Aşama ÇALIŞTI ama hata verdi — '0 sonuç' ile 'araç kırıldı' farkını gösterir."""
         self.console.print(f"[bold red]  ❌ {msg}[/bold red]")
+
+    _SEV_STYLE = {"critical": "bold white on red", "high": "bold red",
+                  "medium": "yellow", "low": "cyan", "info": "dim"}
+
+    def finding(self, f):
+        """Bir bulguyu BULUNDUĞU AN ekrana basar (aşama sonundaki sayaç değil, canlı).
+        webrecon her native kontrolden gelen her bulgu için bunu çağırır."""
+        sev = str(f.get("severity", "") or "").lower()
+        style = self._SEV_STYLE.get(sev, "bold")
+        title = f.get("title") or f.get("class", "") or "bulgu"
+        ev = (f.get("evidence") or f.get("description") or "").strip()
+        line = f"  [{style}]🔓 BULUNDU ({sev or '?'})[/{style}] {title}"
+        if ev:
+            line += f" [dim]— {ev[:110]}[/dim]"
+        self.console.print(line)

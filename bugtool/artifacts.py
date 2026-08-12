@@ -11,8 +11,10 @@ eskiye düşer, böylece eski recon dizinlerinde `triage --active` çalışmaya 
 Yazma (`out_path`) her zaman YENİ adı kullanır.
 """
 
+import json
 import os
-from typing import Dict, Tuple
+import re
+from typing import Any, Dict, List, Tuple
 
 # anahtar -> (yeni açıklayıcı ad, eski/legacy ad)
 _NAMES: Dict[str, Tuple[str, str]] = {
@@ -71,3 +73,80 @@ def new_name(key: str) -> str:
 def ffuf_name(safe_host: str) -> str:
     """ffuf içerik-keşfi sonucu (host başına) — açıklayıcı ad."""
     return f"icerik_kesfi_{safe_host}.json"
+
+
+# ── Bulgu kategori dosyaları (reports/<oturum>/bulgular/<kategori>.jsonl) ─────
+# Her bulgu TİPİ ayrı bir dosyaya toplanır (secret sızıntısı, CORS, ifşa/misconfig,
+# git, takeover, graphql, IDOR + aktif-test sınıfları). Hem recon (webrecon) hem
+# aktif test (main._run_active_test) AYNI dizine yazar (union — üzerine ezmez).
+_FINDING_CATEGORY: Dict[str, str] = {
+    "secret_leak": "secret_sizintisi",
+    "cors_misconfig": "cors",
+    "git_exposure": "git_ifsasi",
+    "subdomain_takeover": "takeover",
+    "graphql_introspection": "graphql",
+    "idor_bola": "idor",
+    "broken_access_control": "yetki_atlatma",
+    "server_error": "sunucu_hatasi",
+    "confirmed_oob": "oob_kanitli",
+}
+# Native exposures modülünün tüm sınıfları → tek "ifsa_misconfig" kategorisi.
+_EXPOSURE_CLASSES = {
+    "env_exposure", "aws_credentials_exposure", "svn_exposure", "hg_exposure",
+    "apache_status", "apache_info", "phpinfo", "ds_store", "spring_actuator",
+    "spring_actuator_env", "prometheus_metrics", "laravel_telescope",
+    "symfony_profiler", "wp_config_backup",
+}
+
+
+def finding_category(f: Dict[str, Any]) -> str:
+    """Bir bulgunun rapor dosyası kategorisini döner. Bilinen sınıflar güzel Türkçe ada
+    eşlenir; exposures sınıfları tek kategoride toplanır; nuclei title'dan tanınır;
+    bilinmeyen ama `class`'ı olan bulgu KENDİ sınıf adıyla dosyalanır (xss→xss, sqli→sqli…)."""
+    cls = str(f.get("class") or "").strip()
+    if cls in _FINDING_CATEGORY:
+        return _FINDING_CATEGORY[cls]
+    if cls in _EXPOSURE_CLASSES:
+        return "ifsa_misconfig"
+    if str(f.get("title") or "").startswith("Nuclei:"):
+        return "nuclei"
+    if cls:
+        return re.sub(r"[^a-z0-9_]+", "_", cls.lower()).strip("_") or "diger"
+    return "diger"
+
+
+def write_findings_files(session_dir: str, findings: List[Dict[str, Any]]):
+    """Bulguları kategoriye göre `reports/<oturum>/bulgular/<kategori>.jsonl` dosyalarına
+    yazar (+ `_TUMU.json`). Mevcut `_TUMU.json` ile BİRLEŞTİRİR (üzerine ezmez) — böylece
+    recon aşaması yazdıktan sonra aktif test de aynı dizine ekleyebilir. Bulgu yoksa no-op."""
+    if not findings or not session_dir:
+        return
+    bdir = os.path.join(session_dir, "bulgular")
+    try:
+        os.makedirs(bdir, exist_ok=True)
+    except OSError:
+        return
+    tumu_path = os.path.join(bdir, "_TUMU.json")
+    existing: List[Dict[str, Any]] = []
+    if os.path.exists(tumu_path):
+        try:
+            with open(tumu_path, "r", encoding="utf-8") as fh:
+                existing = (json.load(fh) or {}).get("findings", []) or []
+        except (OSError, ValueError):
+            existing = []
+    combined = list(existing) + list(findings)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for f in combined:
+        grouped.setdefault(finding_category(f), []).append(f)
+    for cat, items in grouped.items():
+        try:
+            with open(os.path.join(bdir, f"{cat}.jsonl"), "w", encoding="utf-8") as fh:
+                for it in items:
+                    fh.write(json.dumps(it, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+    try:
+        with open(tumu_path, "w", encoding="utf-8") as fh:
+            json.dump({"findings": combined}, fh, indent=2, ensure_ascii=False)
+    except OSError:
+        pass

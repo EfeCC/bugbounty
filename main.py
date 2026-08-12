@@ -575,7 +575,11 @@ def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: s
     out_file = artifacts.out_path(session_dir, "findings")
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump({"findings": all_findings}, f, indent=2, ensure_ascii=False)
-    console.print(f"\n[dim]  Bulgular: {out_file}[/dim]")
+    # Aktif-test bulgularını da kategori dosyalarına ekle (reports/<oturum>/bulgular/<tip>.jsonl).
+    # recon'un yazdığı bulgularla BİRLEŞİR (üzerine ezmez).
+    artifacts.write_findings_files(session_dir, all_findings)
+    console.print(f"\n[dim]  Bulgular: {out_file}  ·  kategori dosyaları: "
+                  f"{os.path.join(session_dir, 'bulgular')}/[/dim]")
     if all_findings:
         console.print("[dim]  Hepsi POTANSİYEL — Windsurf/Burp ile manuel doğrula.[/dim]")
 
@@ -710,6 +714,7 @@ def oob_correlate(session_dir, hits_file):
             existing = []
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump({"findings": existing + confirmed}, f, indent=2, ensure_ascii=False)
+    artifacts.write_findings_files(session_dir, confirmed)   # kategori dosyalarına da ekle
     console.print(f"[dim]  Bulgulara eklendi: {out_file}[/dim]")
 
 
