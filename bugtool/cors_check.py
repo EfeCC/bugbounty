@@ -128,11 +128,12 @@ def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
 
 def _scoped_targets(live_hosts: List[str], max_hosts: int,
                     scope_checker: Optional[Callable[[str], bool]]) -> List[str]:
-    """Host-bazlı dedup + scope-gate + cap (kapsam-dışı host paralel katmana gitmez)."""
+    """Host-bazlı dedup + scope-gate + cap (kapsam-dışı host paralel katmana gitmez).
+    `max_hosts <= 0` → cap uygulanmaz (tüm host'lar)."""
     out: List[str] = []
     seen = set()
     for base_url in live_hosts:
-        if len(out) >= max_hosts:
+        if max_hosts > 0 and len(out) >= max_hosts:
             break
         host = urlparse(base_url).hostname or ""
         if not host or host in seen:

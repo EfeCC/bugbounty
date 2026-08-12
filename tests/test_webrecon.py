@@ -60,6 +60,7 @@ def _patch(monkeypatch, have=True):
     monkeypatch.setattr(webrecon_mod.takeover, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.exposures, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: [])
     # _probe_scheme (httpx boş sonuç yedek yöntemi) gerçek ağa çıkmasın — varsayılan
@@ -304,6 +305,60 @@ def test_apischema_stage_can_be_disabled(monkeypatch, tmp_path):
     p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
     assert "apischema" in p["stages_skipped"]
     assert called["n"] == 0
+
+
+# ── exposures aşaması (native ifşa/misconfig — nuclei'siz) ───────────────────
+def test_exposures_stage_runs_and_feeds_findings(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    fake = [{"title": "Ortam Dosyası İfşası (.env): api.example.com", "severity": "high",
+             "class": "env_exposure", "evidence": "…", "description": "…"}]
+    monkeypatch.setattr(webrecon_mod.exposures, "check", lambda *a, **k: fake)
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "exposures" in p["stages_run"]
+    assert any(f["class"] == "env_exposure" for f in p["findings"])
+
+
+def test_exposures_stage_can_be_disabled(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    called = {"n": 0}
+
+    def spy(*a, **k):
+        called["n"] += 1
+        return []
+    monkeypatch.setattr(webrecon_mod.exposures, "check", spy)
+    wr = WebRecon(stages={"exposures": False})
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "exposures" in p["stages_skipped"]
+    assert called["n"] == 0
+
+
+def test_exposures_gets_ranked_hosts(monkeypatch, tmp_path):
+    # exposures'a verilen host listesi hostrank ile sıralı olmalı: api.example.com (200 +
+    # 'api' label) example.com'dan (301) ÖNCE gelir.
+    _patch(monkeypatch)
+    seen = {}
+
+    def spy(hosts, *a, **k):
+        seen["hosts"] = list(hosts)
+        return []
+    monkeypatch.setattr(webrecon_mod.exposures, "check", spy)
+    wr = WebRecon()
+    wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert seen["hosts"][0] == "https://api.example.com"
+
+
+# ── nuclei host önceliklendirme + cap ───────────────────────────────────────
+def test_nuclei_caps_to_ranked_hosts(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    wr = WebRecon(nuclei_max_hosts=1)
+    wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    import os
+    nuclei_file = os.path.join(str(tmp_path), "nuclei_hedefleri.txt")
+    assert os.path.exists(nuclei_file)
+    with open(nuclei_file, encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+    assert lines == ["https://api.example.com"]   # en yüksek skorlu tek host
 
 
 def test_webrecon_uses_probe_scheme_when_httpx_empty(monkeypatch, tmp_path):

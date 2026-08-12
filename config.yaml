@@ -51,11 +51,18 @@ webrecon:
   # donmayı önler: KISA istek-timeout'u + paralel çalışma.
   probe_timeout: 8             # tek bir per-host isteğin zaman aşımı (sn) — 600 değil!
   probe_concurrency: 8         # aynı anda kaç host kontrol edilsin (DOS VDP için nazikleştirildi)
-  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/secrets/apischema) hepsi
-  # pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
-  #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, secrets: false, apischema: false}
-  # ctlogs/gitcheck/cors/secrets/apischema 'requests' yoksa, takeover 'dnsx' yoksa
+  # git/cors/exposures kaç (ÖNCELİKLENDİRİLMİŞ) host'ta koşsun. hostrank host'ları ilginçlik
+  # skoruyla sıralar → bu ilk N, keyfi değil "en değerli N"dir. 0 = cap yok (tüm host'lar).
+  probe_max_hosts: 150
+  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/exposures/secrets/apischema)
+  # hepsi pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
+  #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, exposures: false,
+  #    secrets: false, apischema: false, nuclei: false}
+  # ctlogs/gitcheck/cors/exposures/secrets/apischema 'requests' yoksa, takeover 'dnsx' yoksa
   # kendiliğinden atlanır.
+  # exposures = nuclei'siz NATIVE yüksek-değerli ifşa/misconfig kontrolü (.env/actuator/phpinfo/
+  #   server-status/VCS metadata/telescope/wp-config yedeği…). HER host'ta, saniyeler içinde.
+  #   nuclei'nin en çok ürettiği tek-GET bulgularını binlerce şablon denemeden yakalar.
   stages: {}
   secrets_max_files: 40        # secret taraması için indirilecek max JS dosyası (cap)
   # API şema keşfi (Swagger/OpenAPI) — bilinen konumlarda + keşfedilen URL'lerde şema
@@ -73,6 +80,12 @@ webrecon:
   katana_max_hosts: 15         # kaç canlı host'ta katana koşulsun (eskiden sınırsız → timeout!)
   katana_crawl_duration: 300   # toplam crawl süresi limiti (sn) — 5dk. Eskiden sınırsız + 600sn timeout'a sığmıyordu
   # Zafiyet taraması (nuclei) — template tabanlı otomatik zaf. tespiti
+  # ÖNEMLİ (host önceliklendirme): nuclei artık TÜM canlı host'lara değil, hostrank'ın en umut
+  # vaadeden ilk `nuclei_max_hosts` host'una çalışır. 300 host × ~2300 şablon → nuclei_timeout'a
+  # çarpıp yarım kesilme sorunu böyle çözülür. Yüksek-değerli ifşa/misconfig bulgularının çoğu
+  # zaten native `exposures` aşamasında (HER host'ta, nuclei'siz) toplanıyor — nuclei tamamlayıcı.
+  nuclei_max_hosts: 40         # nuclei kaç önceliklendirilmiş host'ta koşsun. 0 = hepsi (eski davranış).
+                               # nuclei'yi tamamen kapatmak için: stages: {nuclei: false}
   nuclei_timeout: 1200         # nuclei için AYRI timeout (sn) — 20dk. Eskiden global 600sn → büyük hedeflerde patıyordu
   # DÜZELTME: nuclei filtresiz kurulu template repo'sunun TAMAMINI (binlerce şablon —
   # `nuclei -tl` ile kaç tane kurulu olduğunu görebilirsin) her host'a karşı deniyordu,

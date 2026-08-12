@@ -41,6 +41,8 @@ from . import secrets_scan
 from . import git_check
 from . import cors_check
 from . import api_schema
+from . import exposures
+from . import hostrank
 
 # Nuclei için tech-BAĞIMSIZ yüksek-değerli şablon seti (varsayılan). `-as` (automatic
 # scan) yalnızca httpx'in tespit ettiği teknolojiye göre şablon seçer; modern SPA/API
@@ -69,8 +71,10 @@ class WebRecon:
                  nuclei_auto_scan: bool = False,
                  nuclei_templates: str = DEFAULT_NUCLEI_TEMPLATES,
                  nuclei_exclude_tags: str = "dos,fuzz,intrusive",
+                 nuclei_max_hosts: int = 40,
                  secrets_max_files: int = 40, apischema_max_hosts: int = 15,
-                 probe_timeout: int = 8, probe_concurrency: int = 20):
+                 probe_timeout: int = 8, probe_concurrency: int = 20,
+                 probe_max_hosts: int = 150):
         self.passive_only = passive_only
         self.rate_limit = rate_limit
         self.concurrency = concurrency
@@ -94,12 +98,20 @@ class WebRecon:
         self.nuclei_auto_scan = nuclei_auto_scan
         self.nuclei_templates = nuclei_templates
         self.nuclei_exclude_tags = nuclei_exclude_tags
+        # nuclei artık TÜM host'lara değil, önceliklendirilmiş (hostrank) ilk N host'a
+        # çalışır → 300 host'ta saatlerce sürüp timeout'a çarpma sorunu çözülür. Yüksek-değerli
+        # ifşa/misconfig bulgularının çoğu artık native `exposures` modülünde (nuclei'siz,
+        # HER host'ta). 0 = cap yok (hepsi). Bkz. hostrank.py + exposures.py.
+        self.nuclei_max_hosts = nuclei_max_hosts
         self.secrets_max_files = secrets_max_files
         self.apischema_max_hosts = apischema_max_hosts
-        # Per-host prob (git/cors/secret/apischema): KISA istek-timeout'u (self.timeout=600
-        # DEĞİL) + paralel çalışma → çok subdomain'de dakikalarca donma yerine saniyeler.
+        # Per-host prob (git/cors/exposures/secret/apischema): KISA istek-timeout'u
+        # (self.timeout=600 DEĞİL) + paralel çalışma → çok subdomain'de dakikalarca donma
+        # yerine saniyeler. probe_max_hosts: git/cors/exposures kaç (önceliklendirilmiş)
+        # host'ta koşsun (0 = hepsi).
         self.probe_timeout = probe_timeout
         self.probe_concurrency = probe_concurrency
+        self.probe_max_hosts = probe_max_hosts
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "WebRecon":
@@ -123,10 +135,12 @@ class WebRecon:
             # Anahtar yoksa → varsayılan set; boş string/null → "" (tam tarama escape-hatch'i).
             nuclei_templates=str(wc.get("nuclei_templates", DEFAULT_NUCLEI_TEMPLATES) or ""),
             nuclei_exclude_tags=str(wc.get("nuclei_exclude_tags", "dos,fuzz,intrusive") or ""),
+            nuclei_max_hosts=int(wc.get("nuclei_max_hosts", 40)),
             secrets_max_files=int(wc.get("secrets_max_files", 40)),
             apischema_max_hosts=int(wc.get("apischema_max_hosts", 15)),
             probe_timeout=int(wc.get("probe_timeout", 8)),
             probe_concurrency=int(wc.get("probe_concurrency", 20)),
+            probe_max_hosts=int(wc.get("probe_max_hosts", 150)),
         )
 
     def _find_wordlist(self) -> str:
@@ -375,13 +389,20 @@ class WebRecon:
         live_file = artifacts.out_path(output_dir, "livehosts")
         self._write_lines(live_file, live_urls)
 
+        # ── Host önceliklendirme (hostrank) ──────────────────────────────────
+        # cap'li aşamalar (git/cors/exposures/katana/ffuf/apischema/nuclei) bundan sonra
+        # KEYFİ ilk-N yerine "en umut vaadeden" ilk-N host'u alır. 190-300 host'ta asıl
+        # değerli olanları (api./admin./staging., 200 dönen, ilginç tech) öne çeker.
+        ranked_urls = (hostrank.rank(live_hosts, domain) if live_hosts
+                       else hostrank.rank_urls(live_urls, domain))
+
         # ── 3b. Git deposu ifşası doğrulama ──────────────────────────
         # Her canlı host için /.git/HEAD'i gerçekten indirir (triage.py'nin sadece
         # URL string'ine bakan pasif tespitinden farklı olarak içeriği doğrular).
         if self._stage_on("gitcheck"):
             with reporter.stage("Git deposu ifşası kontrolü (/.git/HEAD)"):
                 git_findings = git_check.check(
-                    live_urls, timeout=self.probe_timeout,
+                    ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
                     concurrency=self.probe_concurrency, scope_checker=_in_scope)
                 findings.extend(git_findings)
             stages_run.append("gitcheck")
@@ -396,7 +417,7 @@ class WebRecon:
         if self._stage_on("cors"):
             with reporter.stage("CORS yanlış yapılandırma kontrolü"):
                 cors_findings = cors_check.check(
-                    live_urls, timeout=self.probe_timeout,
+                    ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
                     concurrency=self.probe_concurrency, scope_checker=_in_scope)
                 findings.extend(cors_findings)
             stages_run.append("cors")
@@ -407,6 +428,25 @@ class WebRecon:
         else:
             stages_skipped.append("cors")
 
+        # ── 3d. Native ifşa/misconfig kontrolü (nuclei'siz, yüksek-değerli) ──
+        # nuclei'nin en çok ürettiği tek-GET-ile-kanıtlanır bulguları (.env/actuator/phpinfo/
+        # server-status/VCS metadata/telescope/wp-config yedeği…) native imza eşleşmesiyle,
+        # HER host'ta (önceliklendirilmiş, cap'li), paralel prob'lar. nuclei'ye göre 300 host'ta
+        # saatler yerine saniyeler. Pasif/düşük-riskli (GET-only), --active gerektirmez.
+        if self._stage_on("exposures"):
+            with reporter.stage("İfşa/yanlış-yapılandırma kontrolü (.env/actuator/phpinfo…)"):
+                exposure_findings = exposures.check(
+                    ranked_urls, max_hosts=self.probe_max_hosts, timeout=self.probe_timeout,
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                findings.extend(exposure_findings)
+            stages_run.append("exposures")
+            if exposure_findings:
+                reporter.done(f"{len(exposure_findings)} ifşa/misconfig bulgusu ⚠️")
+            else:
+                reporter.done("ifşa/misconfig bulgusu yok")
+        else:
+            stages_skipped.append("exposures")
+
         # ── 4. URL/endpoint hasadı (katana aktif + gau pasif) ───────
         urls: List[str] = []
         if not self.passive_only and self._stage_on("katana") and have("katana"):
@@ -416,7 +456,7 @@ class WebRecon:
             #   - -crawl-duration ile toplam süre kısıtlı (varsayılan 5dk)
             #   - -rl ve -c ile rate/concurrency kontrollü
             #   - subprocess timeout = crawl_duration + 30sn tampon
-            katana_hosts = live_urls[:self.katana_max_hosts]
+            katana_hosts = ranked_urls[:self.katana_max_hosts]
             katana_file = artifacts.out_path(output_dir, "katana")
             self._write_lines(katana_file, katana_hosts)
             crawl_dur = self.katana_crawl_duration
@@ -455,7 +495,8 @@ class WebRecon:
                 reporter.skip("İçerik keşfi (ffuf): wordlist bulunamadı — atlandı "
                               "(config → webrecon.ffuf_wordlist)")
             else:
-                hosts = [h for h in live_urls if _in_scope(urlparse(h).hostname or "")]
+                # Önceliklendirilmiş sıradan al: keyfi ilk-N değil, EN DEĞERLİ N host.
+                hosts = [h for h in ranked_urls if _in_scope(urlparse(h).hostname or "")]
                 hosts = hosts[: self.ffuf_max_hosts]
                 ffuf_hits: List[str] = []
                 ffuf_fail_count = 0
@@ -519,7 +560,7 @@ class WebRecon:
         if self._stage_on("apischema"):
             with reporter.stage("API şema keşfi (Swagger/OpenAPI)"):
                 api_targets = api_schema.discover(
-                    live_urls, urls, max_hosts=self.apischema_max_hosts,
+                    ranked_urls, urls, max_hosts=self.apischema_max_hosts,
                     timeout=self.probe_timeout, concurrency=self.probe_concurrency,
                     scope_checker=_in_scope)
                 if api_targets:
@@ -539,14 +580,26 @@ class WebRecon:
         # NOT: `findings` fonksiyonun başında başlatıldı (subdomain-takeover da aynı
         # listeye ekliyor) — burada sıfırlanmıyor, üzerine ekleniyor (extend).
         if self._stage_on("nuclei") and live_urls and have("nuclei"):
-            # DÜZELTME: nuclei artık kendi timeout'unu kullanıyor (varsayılan 1200sn = 20dk).
-            # Eskiden global 600sn timeout kullanılıyordu → büyük hedeflerde patıyordu.
-            # -c: paralel template çalıştırma, -timeout: per-istek zaman aşımı (sn).
-            reporter.info(f"Nuclei: {len(live_urls)} host, max süre {self.nuclei_timeout}sn "
+            # DÜZELTME (host önceliklendirme): nuclei artık TÜM canlı host'lara değil,
+            # hostrank'ın en umut vaadeden ilk `nuclei_max_hosts` host'una çalışır. Eskiden
+            # 300 host × ~2300 şablon → nuclei_timeout'a çarpıp tarama yarım kesiliyordu.
+            # Yüksek-değerli ifşa/misconfig bulgularının çoğu zaten native `exposures`
+            # aşamasında (HER host'ta) toplanıyor; nuclei burada tamamlayıcı bir katman.
+            # nuclei_max_hosts=0 → cap yok (tüm host'lar, eski davranış).
+            if self.nuclei_max_hosts and self.nuclei_max_hosts > 0:
+                nuclei_targets = ranked_urls[: self.nuclei_max_hosts]
+            else:
+                nuclei_targets = ranked_urls or live_urls
+            nuclei_file = os.path.join(output_dir, "nuclei_hedefleri.txt")
+            self._write_lines(nuclei_file, nuclei_targets)
+            # nuclei kendi timeout'unu kullanır (varsayılan 1200sn = 20dk). -c: paralel
+            # template, -timeout: per-istek zaman aşımı (sn).
+            reporter.info(f"Nuclei: {len(nuclei_targets)}/{len(ranked_urls)} host "
+                          f"(önceliklendirilmiş), max süre {self.nuclei_timeout}sn "
                           f"({self.nuclei_timeout // 60} dk)")
-            with reporter.stage(f"Zafiyet taraması (nuclei, {len(live_urls)} host, "
+            with reporter.stage(f"Zafiyet taraması (nuclei, {len(nuclei_targets)} host, "
                                 f"max {self.nuclei_timeout // 60}dk)"):
-                cmd = (f"nuclei -l {live_file} -jsonl -silent -severity {self.nuclei_severity} "
+                cmd = (f"nuclei -l {nuclei_file} -jsonl -silent -severity {self.nuclei_severity} "
                        f"-rl {self.rate_limit} -c {self.concurrency} -timeout 10")
                 # Şablon seçimi (kurulu template repo'sunun TAMAMINI denemek yavaşlığın
                 # asıl sebebiydi): önce -as (istenirse), yoksa tech-bağımsız yüksek-değerli
@@ -626,6 +679,7 @@ class WebRecon:
         lines += [
             "  icerik_kesfi_<host>.json     — ffuf içerik keşfi (host başına)",
             "  katana_hedefleri.txt         — katana'ya verilen host listesi (ara dosya)",
+            "  nuclei_hedefleri.txt         — nuclei'ye verilen önceliklendirilmiş host listesi (ara dosya)",
             "",
             f"Çalışan aşamalar: {', '.join(stages_run)}",
             f"Atlanan aşamalar: {', '.join(stages_skipped)}",
