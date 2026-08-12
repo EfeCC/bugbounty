@@ -40,14 +40,18 @@ Dil: kod İngilizce, **yorumlar/çıktı Türkçe**. Yeni kod da bu konvansiyona
 
 ```
 subfinder + crt.sh(ct_logs)  → subdomain listesi
-  → dnsx                      → çözümlenen (canlı) subdomain
+  → dnsx (-wd wildcard filtre) → çözümlenen (canlı) subdomain
   → takeover                  → dangling CNAME kontrolü (bulgu)
-  → httpx                     → canlı web servisleri (live_urls)  ← MERKEZ liste
-  → git_check + cors_check    → per-host prob (bulgu)
-  → katana(aktif) + gau(pasif) + ffuf → URL/endpoint hasadı
+  → httpx (-fr -favicon -cl)  → canlı web servisleri (live_hosts)
+  → hostrank.rank()           → ranked_urls (ilginçlik skoru + app-dedup)  ← cap'li aşamalar bunu alır
+  → git_check + cors + exposures → per-host prob (bulgu)
+  → katana(aktif) + gau(--subs) + ffuf → URL/endpoint hasadı
+  → jsendpoints.mine()        → JS'ten gizli endpoint çıkarımı (urls'e eklenir)
   → secrets_scan              → JS'lerde secret (bulgu)
-  → api_schema                → Swagger/OpenAPI keşfi
-  → nuclei                    → zafiyet taraması (bulgu)
+  → api_schema                → Swagger/OpenAPI keşfi (query+body param haritası)
+  → cors_check.check_urls()   → API endpoint'lerinde CORS (bulgu)
+  → graphql_check             → introspection açık mı (bulgu)
+  → nuclei (ranked ilk N)     → zafiyet taraması (bulgu)
 ```
 
 Her aşama **binary/bağımlılık yoksa sessizce atlanır** (graceful-degrade, asla çökmez).
@@ -55,7 +59,8 @@ Aşama VARKEN çalışıp hata verirse `reporter.error()` ile yüzeye çıkar (e
 ile "araç kırıldı" ayrımı yoktu). Aşamalar `config → webrecon.stages` ile kapatılabilir.
 
 `hunt`/`triage --active` sonra: `Triage.analyze_dir()` → param/API endpoint/tech triyajı →
-`_run_active_test()` (fuzzer + api_probe, **opt-in + scope-gated**).
+`_run_active_test()`: **query-param fuzzer + POST/JSON body fuzzer (api_schema body_params) +
+api_probe (metot/yetki + IDOR/BOLA + kör SSRF OOB)**, hepsi **opt-in + scope-gated**.
 
 ## Modül haritası (`bugtool/`)
 
@@ -64,11 +69,13 @@ ile "araç kırıldı" ayrımı yoktu). Aşamalar `config → webrecon.stages` i
 | `webrecon.py` | **Ana pipeline orkestratörü**. Tüm recon aşamaları burada. |
 | `hostrank.py` | **Host önceliklendirme** — canlı host'ları ilginçlik skoruyla sıralar; cap'li aşamalar (ffuf/katana/apischema/git/cors/exposures/nuclei) keyfi ilk-N yerine "en değerli N"i alır. Saf/deterministik. |
 | `exposures.py` | **Native yüksek-değerli ifşa/misconfig kontrolü (nuclei'siz).** .env/actuator/phpinfo/server-status/VCS/telescope/wp-config yedeği… tek-GET + imza. `probe.py` paraleliyle HER host'ta saniyeler. |
+| `jsendpoints.py` | **JS endpoint madenciliği (linkfinder-native).** JS bundle'larından gizli path/endpoint çıkarır → `urls`'e ekler (triage + --active test eder). |
+| `graphql_check.py` | **GraphQL introspection** — yaygın yollarda introspection açık mı (tek okuma POST'u). |
 | `shell.py` | `run()` (shell=False + shlex, komut-enjeksiyon güvenli) + binary registry + httpx-çakışma tespiti. **Tüm dış komutlar buradan geçer.** |
 | `scope.py` | `ScopeChecker`, `target_matches` (wildcard/CIDR), `auto_scope_entry`, `host_only`. Scope kapısı. |
 | `triage.py` | Pasif triyaj — recon artifact'lerini okur, tehlikeli param/dosya/tech işaretler. Ağ YOK. |
-| `fuzzer.py` | Aktif query-param testi. DETECTION payload'ları (non-destructive). Scope-gated, opt-in, rate-limited. |
-| `api_probe.py` | Path-tabanlı REST endpoint aktif testi (OPTIONS+GET metot/yetki haritası + kör SSRF OOB). |
+| `fuzzer.py` | Aktif query-param + **POST/JSON body** testi (`fuzz_body_targets`). DETECTION payload'ları (non-destructive). Scope-gated, opt-in, rate-limited. |
+| `api_probe.py` | Path-tabanlı REST endpoint aktif testi (OPTIONS+GET metot/yetki + **IDOR/BOLA sezgisi** + kör SSRF OOB). |
 | `payloads.py` | **Payload arsenali — TEK KAYNAK.** Sınıf başına hints/payloads/detektör. Detection-oriented. |
 | `mutator.py` | WAF-bypass mutator (encode/yorum/case). "Pozitif kontrol" disiplini. |
 | `timing.py` | Zaman-tabanlı zafiyet için doz-yanıt (timing ladder). FIRED/INCONCLUSIVE/NOT_FIRED. |
@@ -134,8 +141,24 @@ seçiminin akıllı olmaması — çözüldü:
 Yeni config: `nuclei_max_hosts`, `probe_max_hosts` (git/cors/exposures cap; 0=hepsi),
 `stages.exposures` (varsayılan açık). Tümü `config.yaml`'da belgeli.
 
+## Çözülmüş: bounty kapsam genişletme (2026-08-12, 2. tur)
+
+Kullanıcının "ne eksik/bozuk" sorusuyla çıkan 6 bug + 6 özellik çözüldü:
+
+**Recon flag fix'leri** (`webrecon.py`): `gau --subs` (apex değil tüm subdomain arşivi),
+`dnsx -wd <domain>` (wildcard DNS çöp filtresi), `httpx -fr -favicon -cl` (redirect takip
++ favicon/content-length → dedup).
+
+**Yeni yetenekler:**
+1. `hostrank.rank(dedup=True)` — favicon/başlık+len ile aynı app'in N kopyasını cap'te tek sayar.
+2. `jsendpoints.py` — JS'ten gizli endpoint madenciliği → `urls`'e beslenir.
+3. `cors_check.check_urls()` — CORS artık kök `/` değil gerçek `/api/...` endpoint'lerinde.
+4. `graphql_check.py` — introspection açık mı.
+5. `api_probe._probe_idor()` — hassas endpoint'te komşu-ID ile IDOR/BOLA sezgisi.
+6. `fuzzer.fuzz_body_targets()` — api_schema body_params'a POST/JSON body fuzzing (main'de wire'lı).
+
 ### Sıradaki olası iyileştirmeler
 - `exposures.py` kataloğunu genişletmek (daha çok yüksek-sinyal yol/imza).
-- Aktif fuzzer'a POST/JSON-body desteği (api_schema body_params zaten çıkarıyor ama beslenmyor).
-- `hostrank` skorunu gerçek çalıştırma verisiyle kalibre etmek.
-- İstenirse nuclei'yi tamamen opsiyonel yapmak (`stages: {nuclei: false}` zaten mümkün).
+- `hostrank` skorunu + IDOR/CORS eşiklerini gerçek çalıştırma verisiyle kalibre etmek.
+- GraphQL: introspection kapalıysa field-suggestion/batching; favicon-hash → bilinen ürün/CVE eşlemesi.
+- Screenshot (gowitness) ile 300 host'u görsel triyaj.

@@ -72,3 +72,47 @@ def test_apex_gets_small_boost_over_equal_generic_sub():
     apex = _h("https://example.com", status=200)
     sub = _h("https://blog.example.com", status=200)   # 'blog' nötr label
     assert hostrank.score_host(apex, domain="example.com") > hostrank.score_host(sub, domain="example.com")
+
+
+# ── host dedup (aynı app'in N kopyası) ───────────────────────────────────────
+def _hf(url, favicon="", title="app", status=200, cl=100):
+    return {"url": url, "status": status, "title": title, "tech": [], "webserver": "",
+            "favicon": favicon, "content_length": cl}
+
+
+def test_dedup_pushes_same_favicon_to_end():
+    # 3 host aynı favicon (aynı app) + 1 farklı → aynı olanların kopyaları sona itilir.
+    hosts = [
+        _hf("https://a.example.com", favicon="111"),
+        _hf("https://b.example.com", favicon="111"),
+        _hf("https://c.example.com", favicon="111"),
+        _hf("https://uniq.example.com", favicon="999"),
+    ]
+    ranked = hostrank.rank(hosts, domain="example.com")
+    assert len(ranked) == 4                       # hiçbir host ATILMADI
+    # ilk 2 farklı imza (a + uniq), b/c sona itildi
+    assert set(ranked[:2]) == {"https://a.example.com", "https://uniq.example.com"}
+    assert set(ranked[2:]) == {"https://b.example.com", "https://c.example.com"}
+
+
+def test_dedup_off_keeps_score_order():
+    hosts = [_hf("https://a.example.com", favicon="111"),
+             _hf("https://b.example.com", favicon="111")]
+    ranked = hostrank.rank(hosts, domain="example.com", dedup=False)
+    assert ranked == ["https://a.example.com", "https://b.example.com"]
+
+
+def test_dedup_none_signature_never_collapses():
+    # favicon yok + title boş → imza None → HER host tekil (yanlış birleştirme yok).
+    hosts = [_hf("https://a.example.com", favicon="", title=""),
+             _hf("https://b.example.com", favicon="", title="")]
+    ranked = hostrank.rank(hosts, domain="example.com")
+    assert len(ranked) == 2
+    assert set(ranked) == {"https://a.example.com", "https://b.example.com"}
+
+
+def test_dedup_signature_prefers_favicon():
+    assert hostrank.dedup_signature(_hf("x", favicon="42"))[0] == "fav"
+    # favicon 0 = "yok" sayılır → title+len imzasına düşer
+    sig = hostrank.dedup_signature(_hf("x", favicon="0", title="T", cl=50))
+    assert sig[0] == "tsl"

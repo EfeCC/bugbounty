@@ -184,3 +184,29 @@ def test_cors_no_fp_when_null_reflected_credentials_false(monkeypatch):
                               "Access-Control-Allow-Credentials": "false"})
     _patch_session_get(monkeypatch, handler)
     assert cors_check.check(["https://pages.example.com"]) == []
+
+
+def test_cors_check_urls_tests_each_endpoint_not_host(monkeypatch):
+    # check_urls host değil, TAM URL bazında test eder: aynı host'un 2 endpoint'i de sınanır.
+    def handler(url, **kw):
+        origin = kw.get("headers", {}).get("Origin", "")
+        return _Resp(headers={"Access-Control-Allow-Origin": origin,
+                              "Access-Control-Allow-Credentials": "true"})
+    _patch_session_get(monkeypatch, handler)
+    out = cors_check.check_urls(["https://api.example.com/v1/me",
+                                 "https://api.example.com/v1/orders"])
+    # aynı host ama iki farklı endpoint → host-dedup DEĞİL, ikisi de bulgu üretir
+    urls = {f["reproduction"] for f in out}
+    assert any("/v1/me" in u for u in urls)
+    assert any("/v1/orders" in u for u in urls)
+
+
+def test_cors_check_urls_scope_gated(monkeypatch):
+    def handler(url, **kw):
+        origin = kw.get("headers", {}).get("Origin", "")
+        return _Resp(headers={"Access-Control-Allow-Origin": origin,
+                              "Access-Control-Allow-Credentials": "true"})
+    _patch_session_get(monkeypatch, handler)
+    out = cors_check.check_urls(["https://out.example/v1/me"],
+                                scope_checker=lambda h: h.endswith("in.example"))
+    assert out == []

@@ -134,20 +134,56 @@ def score_host(host: Dict[str, Any], domain: str = "") -> float:
     return score
 
 
-def rank(live_hosts: List[Dict[str, Any]], domain: str = "") -> List[str]:
+def dedup_signature(host: Dict[str, Any]) -> Any:
+    """Aynı uygulamanın N subdomain'deki kopyasını tanımak için imza. favicon hash'i en
+    güçlü sinyal (aynı app → aynı favicon); yoksa (status, title, content-length) üçlüsü.
+    Güvenle kümelenemeyen host'lar (favicon yok + title boş) için None döner → HER ZAMAN
+    tekil sayılır (yanlışlıkla farklı app'leri birleştirme)."""
+    fav = str(host.get("favicon", "") or "").strip()
+    if fav and fav not in ("0", "-0"):
+        return ("fav", fav)
+    title = (host.get("title", "") or "").strip()
+    if not title:
+        return None
+    try:
+        cl = int(host.get("content_length") or 0)
+    except (ValueError, TypeError):
+        cl = 0
+    try:
+        st = int(host.get("status") or 0)
+    except (ValueError, TypeError):
+        st = 0
+    return ("tsl", st, title, cl)
+
+
+def rank(live_hosts: List[Dict[str, Any]], domain: str = "", dedup: bool = True) -> List[str]:
     """httpx host kayıtlarını (dict listesi) ilginçlik skoruyla sırala; URL listesi döner
     (en umut vaadeden önce). Eşit skorda orijinal (httpx) sıra korunur — kararlı sıralama.
-    URL'ler tekilleştirilir."""
+    URL'ler tekilleştirilir.
+
+    `dedup=True`: aynı app imzasını (favicon/başlık+len) paylaşan host'lardan sadece İLKİ
+    (en yüksek skorlu) normal sırasında kalır; kopyaları listenin SONUNA itilir. Böylece
+    cap'li aşamalar (ffuf/nuclei…) N FARKLI uygulamaya harcanır, aynı app'in 50 kopyasına
+    değil. HİÇBİR host atılmaz — sadece sıra değişir (cap altında kalan kopyalar yine gider)."""
     indexed = list(enumerate(live_hosts))
     indexed.sort(key=lambda pair: (-score_host(pair[1], domain), pair[0]))
-    out: List[str] = []
-    seen = set()
+    uniques: List[str] = []
+    dupes: List[str] = []
+    seen_urls = set()
+    seen_sigs = set()
     for _, h in indexed:
         u = h.get("url", "") or ""
-        if u and u not in seen:
-            seen.add(u)
-            out.append(u)
-    return out
+        if not u or u in seen_urls:
+            continue
+        seen_urls.add(u)
+        sig = dedup_signature(h) if dedup else None
+        if sig is not None and sig in seen_sigs:
+            dupes.append(u)          # aynı app'in başka kopyası → sona
+        else:
+            if sig is not None:
+                seen_sigs.add(sig)
+            uniques.append(u)
+    return uniques + dupes
 
 
 def rank_urls(urls: List[str], domain: str = "") -> List[str]:

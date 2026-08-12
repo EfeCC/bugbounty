@@ -126,6 +126,49 @@ def check(live_hosts: List[str], max_hosts: int = 60, timeout: int = 8,
     return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
 
 
+def check_urls(urls: List[str], max_urls: int = 120, timeout: int = 8,
+               concurrency: int = 20,
+               scope_checker: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
+    """`check`'ten farkı: host kökü değil, VERİLEN TAM URL'leri (genelde `/api/...` veri
+    endpoint'leri) test eder — asıl sömürülebilir CORS bunlardadır, host kökünde değil.
+    URL bazında (host+path) dedup edilir (host bazında DEĞİL), böylece aynı host'un birden
+    çok endpoint'i test edilir. `max_urls <= 0` → cap yok. Scope-gate + `requests` graceful-degrade."""
+    if not urls:
+        return []
+    try:
+        import requests  # noqa: F401
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except ImportError:
+            pass
+    except ImportError:
+        return []
+
+    targets: List[str] = []
+    seen = set()
+    for u in urls:
+        if max_urls > 0 and len(targets) >= max_urls:
+            break
+        base = (u or "").split("#", 1)[0].rstrip("/")
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        host = urlparse(base).hostname or ""
+        if not host:
+            continue
+        if scope_checker:
+            try:
+                if not scope_checker(host):
+                    continue
+            except Exception:
+                continue
+        targets.append(base)
+
+    from .probe import parallel_collect
+    return parallel_collect(lambda b: _check_one(b, timeout), targets, concurrency)
+
+
 def _scoped_targets(live_hosts: List[str], max_hosts: int,
                     scope_checker: Optional[Callable[[str], bool]]) -> List[str]:
     """Host-bazlı dedup + scope-gate + cap (kapsam-dışı host paralel katmana gitmez).

@@ -60,7 +60,10 @@ def _patch(monkeypatch, have=True):
     monkeypatch.setattr(webrecon_mod.takeover, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.git_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.cors_check, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.cors_check, "check_urls", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.exposures, "check", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.jsendpoints, "mine", lambda *a, **k: [])
+    monkeypatch.setattr(webrecon_mod.graphql_check, "check", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.secrets_scan, "scan", lambda *a, **k: [])
     monkeypatch.setattr(webrecon_mod.api_schema, "discover", lambda *a, **k: [])
     # _probe_scheme (httpx boş sonuç yedek yöntemi) gerçek ağa çıkmasın — varsayılan
@@ -346,6 +349,50 @@ def test_exposures_gets_ranked_hosts(monkeypatch, tmp_path):
     wr = WebRecon()
     wr.run_pipeline("example.com", output_dir=str(tmp_path))
     assert seen["hosts"][0] == "https://api.example.com"
+
+
+# ── JS endpoint madenciliği + graphql + cors-endpoint aşamaları ──────────────
+def test_jsmine_stage_adds_mined_endpoints(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    monkeypatch.setattr(webrecon_mod.jsendpoints, "mine",
+                        lambda *a, **k: ["https://api.example.com/api/gizli-endpoint"])
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "jsmine" in p["stages_run"]
+    assert "https://api.example.com/api/gizli-endpoint" in p["urls"]
+
+
+def test_graphql_stage_feeds_findings(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    fake = [{"title": "GraphQL Introspection Açık: api.example.com", "severity": "medium",
+             "class": "graphql_introspection", "evidence": "…", "description": "…"}]
+    monkeypatch.setattr(webrecon_mod.graphql_check, "check", lambda *a, **k: fake)
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert "graphql" in p["stages_run"]
+    assert any(f["class"] == "graphql_introspection" for f in p["findings"])
+
+
+def test_cors_endpoint_stage_feeds_findings(monkeypatch, tmp_path):
+    _patch(monkeypatch)
+    # KATANA test verisi /v1/users içerir → _api_endpoint_urls boş değil → check_urls çağrılır.
+    fake = [{"title": "CORS", "severity": "high", "class": "cors_misconfig",
+             "evidence": "…", "description": "…"}]
+    monkeypatch.setattr(webrecon_mod.cors_check, "check_urls", lambda *a, **k: fake)
+    wr = WebRecon()
+    p = wr.run_pipeline("example.com", output_dir=str(tmp_path))
+    assert any(f["class"] == "cors_misconfig" for f in p["findings"])
+
+
+def test_api_endpoint_urls_filter():
+    wr = WebRecon()
+    urls = ["https://a.example.com/v1/users", "https://a.example.com/style.css",
+            "https://a.example.com/blog/post", "https://a.example.com/api/orders"]
+    out = wr._api_endpoint_urls(urls, lambda h: True)
+    assert any(u.endswith("/v1/users") for u in out)
+    assert any(u.endswith("/api/orders") for u in out)
+    assert not any(u.endswith(".css") for u in out)
+    assert not any("/blog/" in u for u in out)
 
 
 # ── nuclei host önceliklendirme + cap ───────────────────────────────────────

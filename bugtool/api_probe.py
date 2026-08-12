@@ -56,6 +56,10 @@ _DESTRUCTIVE_RE = re.compile(
     r"disable|enable|execute|run|pay|charge|refund|revoke|rotate|purge|drop|wipe|"
     r"deploy|provision|rollback|terminate|destroy|migrate|import|upload)", re.I)
 
+# IDOR/BOLA sezgisi: path'in SON sayısal segmenti (/users/42 → 42). Bunu komşu ID'lerle
+# değiştirip kimliksiz erişim deneriz.
+_NUM_SEG_RE = re.compile(r"(?<=/)(\d{1,12})(?=/|$)")
+
 # POST-JSON OOB body'sinde denenecek yaygın URL alan adları (hepsi aynı token'a gider).
 _URL_BODY_FIELDS = ["url", "uri", "endpoint", "target", "host", "callback", "callbackUrl",
                     "callback_url", "webhook", "webhookUrl", "redirectUri", "redirect_uri",
@@ -72,7 +76,7 @@ class ApiProbe:
     def __init__(self, scope_checker: Optional[Callable[[str], bool]] = None,
                  delay: float = 0.0, max_requests: int = 500, timeout: int = 10,
                  headers: Optional[Dict[str, str]] = None, verify_tls: bool = False,
-                 block_threshold: int = 8, oob_post: bool = True):
+                 block_threshold: int = 8, oob_post: bool = True, idor: bool = True):
         self.scope_checker = scope_checker
         self.delay = float(delay)
         self.max_requests = int(max_requests)
@@ -80,6 +84,7 @@ class ApiProbe:
         self.headers = {"User-Agent": _DEFAULT_UA, **(headers or {})}
         self.verify_tls = verify_tls
         self.oob_post = bool(oob_post)     # POST-JSON OOB probu açık mı (bağlantı-test edici allowlist)
+        self.idor = bool(idor)             # IDOR/BOLA sezgisi (komşu ID ile kimliksiz erişim) açık mı
         self.block_threshold = int(block_threshold)
         self._consecutive_blocked = 0
         self.backoff_triggered = False
@@ -109,6 +114,7 @@ class ApiProbe:
             verify_tls=bool(fc.get("verify_tls", False)),
             block_threshold=int(fc.get("block_threshold", 8)),
             oob_post=bool(fc.get("api_oob_post", True)),
+            idor=bool(fc.get("api_idor", True)),
         )
 
     def _in_scope(self, url: str) -> bool:
@@ -148,6 +154,8 @@ class ApiProbe:
             row, finds = self._map_endpoint(url)
             if row:
                 method_map.append(row)
+            if self.idor:
+                finds = finds + self._probe_idor(url)
             for f in finds:
                 findings.append(f)
                 if on_finding:
@@ -197,6 +205,52 @@ class ApiProbe:
         else:
             note = f"HTTP {status}"
         return ({"url": url, "get_status": status, "allow": allow.strip(), "note": note}, findings)
+
+    # ── IDOR / BOLA sezgisi (komşu ID ile kimliksiz erişim) ───────────────────
+    def _probe_idor(self, url: str) -> List[Dict[str, Any]]:
+        """Path'in son sayısal segmentini (/users/42) komşu ID'lerle değiştirip KİMLİKSİZ
+        erişim dener. Orijinal + en az bir komşu ID 200 dönüyor VE gövdeleri BİRBİRİNDEN
+        farklıysa → farklı nesnelere yetkisiz erişim = POTANSİYEL IDOR/BOLA.
+
+        FP azaltma: yalnızca hassas-isimli path'lerde çalışır (public katalog /products/1
+        gibi yerlerde farklı nesne dönmesi normaldir); ve komşu cevap orijinalle AYNI
+        gövdedeyse (statik/aynı) sayılmaz. Sadece GET — non-destructive."""
+        path = urlparse(url).path or ""
+        if not _SENSITIVE_RE.search(path):
+            return []
+        matches = list(_NUM_SEG_RE.finditer(path))
+        if not matches:
+            return []
+        m = matches[-1]                       # son sayısal segment
+        try:
+            orig_id = int(m.group(1))
+        except ValueError:
+            return []
+        if self._sent >= self.max_requests:
+            return []
+        base = self._request("GET", url)
+        if base is None or not (200 <= base["status"] < 300) or base["length"] < 8:
+            return []                          # kimliksiz zaten erişilemiyorsa IDOR yok
+        base_body = base["body"]
+        # Komşu ID'ler (negatif/again kaçın): orig-1, orig+1, yoksa orig+2
+        alt_ids = [i for i in (orig_id - 1, orig_id + 1, orig_id + 2) if i >= 0 and i != orig_id]
+        for alt in alt_ids[:2]:
+            if self._sent >= self.max_requests:
+                break
+            alt_path = path[:m.start(1)] + str(alt) + path[m.end(1):]
+            alt_url = urlparse(url)._replace(path=alt_path).geturl()
+            r = self._request("GET", alt_url)
+            if r is None or not (200 <= r["status"] < 300) or r["length"] < 8:
+                continue
+            # Farklı nesne mi? (aynı gövde = statik/aynı kayıt → IDOR değil)
+            if r["body"] != base_body and abs(r["length"] - base["length"]) >= 0:
+                return [self._finding(
+                    "idor_bola", url, "GET", r["status"],
+                    f"Hassas endpoint'te ID değiştirildi ({orig_id}→{alt}); ikisi de kimliksiz "
+                    f"2xx VE farklı gövde döndü ({base['length']}B vs {r['length']}B) — "
+                    f"yetkisiz nesne erişimi (IDOR/BOLA) olabilir",
+                    severity="high", confidence="low")]
+        return []
 
     # ── OOB / SSRF prob ekimi ─────────────────────────────────────────────────
     def _plant_ssrf(self, url: str, oob) -> int:

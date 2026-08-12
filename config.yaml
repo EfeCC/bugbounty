@@ -54,15 +54,18 @@ webrecon:
   # git/cors/exposures kaç (ÖNCELİKLENDİRİLMİŞ) host'ta koşsun. hostrank host'ları ilginçlik
   # skoruyla sıralar → bu ilk N, keyfi değil "en değerli N"dir. 0 = cap yok (tüm host'lar).
   probe_max_hosts: 150
-  # Aşama kapatma. YENİ modüller (ctlogs/takeover/gitcheck/cors/exposures/secrets/apischema)
-  # hepsi pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK. Kapatmak için:
+  # Aşama kapatma. YENİ modüller pasif/düşük-riskli, --active GEREKTİRMEZ, varsayılan AÇIK.
+  # Kapatmak için (örnek):
   #   {ctlogs: false, takeover: false, gitcheck: false, cors: false, exposures: false,
-  #    secrets: false, apischema: false, nuclei: false}
-  # ctlogs/gitcheck/cors/exposures/secrets/apischema 'requests' yoksa, takeover 'dnsx' yoksa
-  # kendiliğinden atlanır.
-  # exposures = nuclei'siz NATIVE yüksek-değerli ifşa/misconfig kontrolü (.env/actuator/phpinfo/
-  #   server-status/VCS metadata/telescope/wp-config yedeği…). HER host'ta, saniyeler içinde.
-  #   nuclei'nin en çok ürettiği tek-GET bulgularını binlerce şablon denemeden yakalar.
+  #    jsmine: false, graphql: false, secrets: false, apischema: false, nuclei: false}
+  # requests yoksa (ctlogs/gitcheck/cors/exposures/jsmine/graphql/secrets/apischema) ya da
+  # dnsx yoksa (takeover) ilgili aşama kendiliğinden atlanır.
+  # exposures = nuclei'siz NATIVE yüksek-değerli ifşa/misconfig (.env/actuator/phpinfo/
+  #   server-status/VCS metadata/telescope/wp-config yedeği…) — HER host'ta, saniyeler.
+  # jsmine   = JS bundle'larından gizli endpoint/path madenciliği (linkfinder-native) →
+  #   çıkan endpoint'ler urls'e eklenir, triage + --active otomatik test eder.
+  # graphql  = yaygın GraphQL yollarında introspection açık mı (tek okuma POST'u).
+  # cors     = kök `/` CORS'una EK olarak keşfedilen `/api/...` endpoint'lerinde de test eder.
   stages: {}
   secrets_max_files: 40        # secret taraması için indirilecek max JS dosyası (cap)
   # API şema keşfi (Swagger/OpenAPI) — bilinen konumlarda + keşfedilen URL'lerde şema
@@ -136,3 +139,7 @@ fuzz:
   # callback/oauth/webhook) + yıkıcı-OLMAYAN endpoint'lere JSON body ile kör SSRF probu da
   # gönderilsin mi (yalnızca --oob verildiğinde). false = sadece GET-query OOB probu.
   api_oob_post: true
+  # IDOR/BOLA sezgisi: hassas-isimli endpoint'in path'indeki sayısal ID'yi (/users/42) komşu
+  # ID'lerle değiştirip KİMLİKSİZ erişim dener; ikisi de 2xx + farklı gövde → POTANSİYEL IDOR.
+  # Sadece GET (non-destructive). Public katalog FP'sini azaltmak için yalnızca hassas path'lerde.
+  api_idor: true

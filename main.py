@@ -383,8 +383,8 @@ def _render_triage(result: dict):
             params = list(t.get("params", {}).keys()) + list(t.get("body_params", {}).keys())
             tag = f"({', '.join(params[:5])})" if params else ""
             console.print(f"  • {t.get('method', 'GET')} {t['url'][:85]} {tag}")
-        console.print("[dim]  (pasif keşif — --active fuzzer'a otomatik beslenmiyor, "
-                      "manuel/Burp ile test et)[/dim]")
+        console.print("[dim]  (--active ile POST/PUT/PATCH + body-parametreliler otomatik "
+                      "body-fuzzing'e beslenir; GET olanlar api-probe/manuel)[/dim]")
 
 
 def _render_api_probe(api_res: dict, sent: int):
@@ -439,12 +439,17 @@ def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: s
     önce kontrol edilir ve otomatik izni EZER."""
     param_targets = result.get("param_targets") or []
     api_endpoints = result.get("api_endpoints") or []
-    if not param_targets and not api_endpoints:
-        console.print("[dim]  Aktif test için parametreli endpoint / API endpoint yok — atlandı.[/dim]")
+    # api_schema'dan çıkarılan POST/PUT/PATCH + body-parametreli endpoint'ler → body fuzzing.
+    body_targets = [t for t in (result.get("api_schema_targets") or [])
+                    if t.get("body_params")
+                    and (t.get("method") or "").upper() in ("POST", "PUT", "PATCH")]
+    if not param_targets and not api_endpoints and not body_targets:
+        console.print("[dim]  Aktif test için parametreli endpoint / API endpoint / body-param "
+                      "yok — atlandı.[/dim]")
         return
 
     # OTOMATİK scope: istek atılacak host'ları izinli say (auto_from_target açıksa).
-    endpoint_hosts = _endpoint_hosts(param_targets, api_endpoints)
+    endpoint_hosts = _endpoint_hosts(param_targets, list(api_endpoints) + list(body_targets))
     checker = _scope_checker(config, extra_allowed=endpoint_hosts)
     if not checker.has_real_scope():
         console.print(Panel(
@@ -499,6 +504,32 @@ def _run_active_test(result: dict, config: dict, session_dir: str, oob_domain: s
         if fuzzer.backoff_triggered:
             console.print("[yellow]  ⚠ Hedef art arda 403/429 döndü — WAF/rate-limit'e çarpıldı, "
                           "tarama erken durduruldu.[/yellow]")
+
+    # ── 1b. POST/JSON body fuzzing (api_schema body_params) ──
+    if body_targets:
+        console.print(Panel(
+            f"[bold red]⚡ AKTİF TEST (JSON body)[/bold red] — {len(body_targets)} "
+            f"POST/PUT/PATCH endpoint.\n"
+            f"[dim]api_schema'dan çıkarılan body parametrelerine detection payload'ları "
+            f"(aynı bütçe) · yalnızca scope-içi.[/dim]", border_style="red"))
+
+        def _breport(f):
+            if f.get("verdict") == "inconclusive":
+                console.print(f"  [yellow]❓ {f['class'].upper()} (BELİRSİZ)[/yellow] "
+                              f"{f['param']} @ {f['url'][:64]} — {f['evidence'][:80]}")
+            else:
+                console.print(f"  [bold red]🎯 {f['class'].upper()}[/bold red] "
+                              f"({f['confidence']}) body:{f['param']} @ {f['url'][:60]} — "
+                              f"{f['evidence'][:80]}")
+
+        with console.status("[bold red]Body fuzzing…[/bold red]", spinner="dots") as status:
+            def _bprog(i, total, sent, nf):
+                status.update(f"[bold red]Body fuzzing — {i}/{total} endpoint · {sent} istek · "
+                              f"{nf} bulgu[/bold red]")
+            body_findings = fuzzer.fuzz_body_targets(body_targets, on_finding=_breport,
+                                                     on_progress=_bprog)
+        all_findings.extend(body_findings)
+        console.print(f"\n[bold]Body testi bitti — {len(body_findings)} POTANSİYEL bulgu.[/bold]")
 
     # ── 2. Path-tabanlı API-probe (metot/yetki haritası + kör SSRF OOB) ──
     if api_endpoints:

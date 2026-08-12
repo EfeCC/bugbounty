@@ -43,6 +43,8 @@ from . import cors_check
 from . import api_schema
 from . import exposures
 from . import hostrank
+from . import jsendpoints
+from . import graphql_check
 
 # Nuclei için tech-BAĞIMSIZ yüksek-değerli şablon seti (varsayılan). `-as` (automatic
 # scan) yalnızca httpx'in tespit ettiği teknolojiye göre şablon seçer; modern SPA/API
@@ -55,6 +57,16 @@ from . import hostrank
 DEFAULT_NUCLEI_TEMPLATES = ("http/exposures/,http/misconfiguration/,http/default-logins/,"
                             "http/exposed-panels/,http/takeovers/,http/vulnerabilities/,"
                             "dns/,ssl/")
+
+# API-ish veri endpoint'i imzası — CORS'un asıl sömürülebilir olduğu yer host kökü DEĞİL,
+# bu tür `/api/...` veri endpoint'leridir (kimliğe-özel JSON döndürürler).
+_API_ENDPOINT_RE = re.compile(
+    r"/(?:api|v\d+|graphql|graphiql|rest|internal|oauth|jsonapi|odata|account|"
+    r"session|profile|me)(?:/|$|\?)", re.I)
+# Statik varlık → CORS anlamsız (public, kimliğe-özel değil). API URL seçiminden elenir.
+_STATIC_ASSET_RE = re.compile(
+    r"\.(?:css|js|mjs|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|ico|bmp|avif|"
+    r"mp4|webm|mp3|wav|ogg|avi|mov|pdf|zip|gz)$", re.I)
 
 
 class WebRecon:
@@ -326,7 +338,11 @@ class WebRecon:
         resolved = subdomains
         if self._stage_on("dnsx") and len(subdomains) > 1 and have("dnsx"):
             with reporter.stage("Canlı subdomain'ler çözümleniyor (dnsx)"):
-                r = run(f"dnsx -l {subs_file} -silent", timeout=self.timeout)
+                # DÜZELTME: `-wd {domain}` (wildcard-domain filtresi) — `*.example.com`
+                # wildcard'lı hedeflerde crt.sh yüzlerce SAHTE subdomain üretir, hepsi aynı
+                # IP'ye çözülür; bu bayrak olmadan httpx/nuclei o çöpü de tarardı. dnsx
+                # wildcard yanıtlarını tespit edip eler → gerçek host'lara odaklan.
+                r = run(f"dnsx -l {subs_file} -silent -wd {domain}", timeout=self.timeout)
                 got = [h for h in self._lines(r["stdout"]) if _in_scope(h)]
             self._warn_if_failed(reporter, r, "dnsx")
             if got:
@@ -363,7 +379,13 @@ class WebRecon:
         live_hosts: List[Dict[str, Any]] = []
         if self._stage_on("httpx") and have("httpx"):
             with reporter.stage(f"HTTP servisleri taranıyor (httpx, {len(resolved)} host)"):
+                # -fr: redirect'i takip et → apex→www / http→https yönlendiren asıl
+                #   uygulamanın SON status/title/tech'i alınır (301 görünüp hostrank'ta
+                #   dibe düşmesi engellenir).
+                # -favicon + -cl: favicon mmh3 hash'i + content-length → host dedup
+                #   (aynı app'in N kopyası tek imzayla kümelenip cap bütçesi katlanır).
                 cmd = (f"httpx -l {resolved_file} -silent -sc -title -tech-detect -json "
+                       f"-fr -favicon -cl "
                        f"-rl {self.rate_limit} -threads {self.concurrency}")
                 r = run(cmd, timeout=self.timeout)
                 live_hosts = self._parse_httpx(r["stdout"])
@@ -477,7 +499,10 @@ class WebRecon:
                           (" (passive_only)" if self.passive_only else ""))
         if self._stage_on("gau") and have("gau"):
             with reporter.stage("Arşiv URL'leri toplanıyor (gau — pasif)"):
-                r = run(f"gau --threads {self.concurrency} {domain}", timeout=self.timeout)
+                # DÜZELTME: `--subs` — eskiden gau yalnızca apex domain'in arşiv URL'lerini
+                # çekiyordu; 300 subdomain'li hedefte subdomain'lerin geçmiş URL'leri hiç
+                # gelmiyordu. `--subs` apex + tüm subdomain'leri kapsar.
+                r = run(f"gau --subs --threads {self.concurrency} {domain}", timeout=self.timeout)
                 urls.extend(self._lines(r["stdout"]))
             self._warn_if_failed(reporter, r, "gau")
             stages_run.append("gau")
@@ -525,6 +550,27 @@ class WebRecon:
             elif self.passive_only:
                 reporter.skip("İçerik keşfi (ffuf) atlandı (passive_only)")
 
+        # ── 4b2. JS endpoint madenciliği (linkfinder-native) ─────────
+        # Keşfedilen JS bundle'larını indirip içlerindeki path/endpoint string'lerini
+        # (fetch("/api/..."), route tabloları) çıkarır → modern SPA'da gizli saldırı
+        # yüzeyinin en zengin kaynağı. Bulunan endpoint'ler `urls`'e eklenir → triage +
+        # --active (fuzzer/api_probe) otomatik test eder. Pasif/GET-only, --active gerektirmez.
+        if self._stage_on("jsmine"):
+            with reporter.stage("JS endpoint madenciliği (bundle'lardan gizli yol çıkarımı)"):
+                mined = jsendpoints.mine(
+                    urls, max_files=self.secrets_max_files, timeout=self.probe_timeout,
+                    concurrency=self.probe_concurrency, scope_checker=_in_scope)
+            before = len(set(urls))
+            urls.extend(mined)
+            new_count = len(set(urls)) - before
+            stages_run.append("jsmine")
+            if mined:
+                reporter.done(f"{new_count} yeni endpoint JS'ten çıkarıldı")
+            else:
+                reporter.done("JS'ten yeni endpoint çıkmadı")
+        else:
+            stages_skipped.append("jsmine")
+
         urls = self._dedup_scope_urls(urls, _in_scope)[: self.max_urls]
         urls_file = artifacts.out_path(output_dir, "urls")
         self._write_lines(urls_file, urls)
@@ -553,9 +599,8 @@ class WebRecon:
         # ── 4d. Swagger/OpenAPI şema keşfi ────────────────────────────
         # Bilinen konumlarda + keşfedilen URL'ler arasında şema dosyası arar, bulursa
         # query+body parametreli TAM endpoint haritasını çıkarır (bkz. api_schema.py).
-        # Tamamen pasif/GET-only, --active gerektirmez. NOT: body_params/body_template
-        # şu an sadece bilgi amaçlı — fuzzer'a otomatik BESLENMEZ (fuzzer henüz POST/
-        # JSON body fuzzing desteklemiyor, bu ayrı bir özellik).
+        # Tamamen pasif/GET-only, --active gerektirmez. body_params/body_template artık
+        # --active'de fuzzer'ın POST/JSON body fuzzing'ine besleniyor (bkz. main._run_active_test).
         api_targets: List[Dict[str, Any]] = []
         if self._stage_on("apischema"):
             with reporter.stage("API şema keşfi (Swagger/OpenAPI)"):
@@ -575,6 +620,41 @@ class WebRecon:
                 reporter.done("şema dosyası bulunamadı")
         else:
             stages_skipped.append("apischema")
+
+        # ── 4e. CORS — GERÇEK API endpoint'lerinde ────────────────────
+        # Kök `/` CORS'u (stage 3c) çoğu zaman etkisizdir; sömürülebilir CORS `/api/...`
+        # veri endpoint'lerindedir. Keşfedilen URL'lerden API-ish olanları seçip her birinde
+        # Origin-yansıması + credentials kontrolü yapar (host değil, TAM URL bazında).
+        if self._stage_on("cors"):
+            api_urls = self._api_endpoint_urls(urls, _in_scope)
+            if api_urls:
+                with reporter.stage(f"CORS (API endpoint'leri, {len(api_urls)})"):
+                    cors_ep_findings = cors_check.check_urls(
+                        api_urls, max_urls=self.probe_max_hosts, timeout=self.probe_timeout,
+                        concurrency=self.probe_concurrency, scope_checker=_in_scope)
+                    findings.extend(cors_ep_findings)
+                if cors_ep_findings:
+                    reporter.done(f"{len(cors_ep_findings)} endpoint CORS bulgusu ⚠️")
+                else:
+                    reporter.done("endpoint CORS sorunu yok")
+
+        # ── 4f. GraphQL introspection ─────────────────────────────────
+        # Yaygın GraphQL yollarına introspection sorgusu (tek okuma POST'u, non-destructive);
+        # açıksa tüm şema (tipler/mutasyonlar) dökülür → yüksek-değerli, sık bulgu.
+        if self._stage_on("graphql"):
+            with reporter.stage("GraphQL introspection kontrolü"):
+                gql_findings = graphql_check.check(
+                    ranked_urls, urls, max_hosts=self.probe_max_hosts,
+                    timeout=self.probe_timeout, concurrency=self.probe_concurrency,
+                    scope_checker=_in_scope)
+                findings.extend(gql_findings)
+            stages_run.append("graphql")
+            if gql_findings:
+                reporter.done(f"{len(gql_findings)} açık GraphQL introspection ⚠️")
+            else:
+                reporter.done("açık GraphQL introspection yok")
+        else:
+            stages_skipped.append("graphql")
 
         # ── 5. nuclei ────────────────────────────────────────────────
         # NOT: `findings` fonksiyonun başında başlatıldı (subdomain-takeover da aynı
@@ -710,6 +790,9 @@ class WebRecon:
                 "title": obj.get("title", "") or "",
                 "tech": obj.get("tech") or obj.get("technologies") or [],
                 "webserver": obj.get("webserver", "") or "",
+                # favicon mmh3 hash'i + content-length → host dedup (hostrank.dedup_signature).
+                "favicon": str(obj.get("favicon", "") or obj.get("favicon_hash", "") or ""),
+                "content_length": obj.get("content_length") or obj.get("content-length") or 0,
             })
         return hosts
 
@@ -755,6 +838,30 @@ class WebRecon:
             if host and not in_scope(host):
                 continue
             out.append(u)
+        return out
+
+    @staticmethod
+    def _api_endpoint_urls(urls: List[str], in_scope: Callable[[str], bool]) -> List[str]:
+        """Harvest edilen URL'lerden API-ish veri endpoint'lerini seçer (CORS endpoint
+        testi için). host+path bazında dedup, statik varlık + kapsam-dışı elenir."""
+        out: List[str] = []
+        seen = set()
+        for u in urls:
+            try:
+                pr = urlparse(u.replace("&amp;", "&"))
+            except (ValueError, TypeError):
+                continue
+            path = pr.path or ""
+            if not _API_ENDPOINT_RE.search(path) or _STATIC_ASSET_RE.search(path):
+                continue
+            host = pr.hostname or ""
+            if not host or not in_scope(host):
+                continue
+            key = (host, path.rstrip("/") or "/")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(pr._replace(fragment="").geturl())
         return out
 
     @staticmethod

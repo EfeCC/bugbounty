@@ -171,6 +171,125 @@ class ParamFuzzer:
     def _has_hint(target: Dict[str, Any]) -> bool:
         return any(hinted for hinted in (target.get("params") or {}).values())
 
+    # ── POST/JSON body fuzzing (api_schema body_params) ───────────────────────
+    def fuzz_body_targets(self, targets: List[Dict[str, Any]],
+                          on_finding: Optional[Callable[[Dict], None]] = None,
+                          on_progress: Optional[Callable[[int, int, int, int], None]] = None
+                          ) -> List[Dict[str, Any]]:
+        """api_schema hedeflerini (POST/PUT/PATCH + body_params) JSON gövdesine detection
+        payload'ları basarak test eder. Query fuzzer'ıyla AYNI detektörleri/payload'ları
+        kullanır ama enjeksiyonu JSON body alanına yapar. Aynı bütçeyi (`max_requests`,
+        backoff) paylaşır. POTANSİYEL bulgu listesi döner."""
+        findings: List[Dict[str, Any]] = []
+        if not self.available:
+            return findings
+        ordered = sorted(enumerate(targets),
+                         key=lambda item: (0 if self._has_body_hint(item[1]) else 1, item[0]))
+        total = len(ordered)
+        for i, (_idx, t) in enumerate(ordered, 1):
+            if self._sent >= self.max_requests:
+                break
+            if self._consecutive_blocked >= self.block_threshold:
+                self.backoff_triggered = True
+                break
+            url = t.get("url", "")
+            method = (t.get("method") or "POST").upper()
+            body_params = t.get("body_params") or {}
+            template = dict(t.get("body_template") or {k: "1" for k in body_params})
+            if not url or not body_params or not self._in_scope(url):
+                if on_progress:
+                    on_progress(i, total, self._sent, len(findings))
+                continue
+            baseline = self._request_body(method, url, template)
+            if baseline is None:
+                if on_progress:
+                    on_progress(i, total, self._sent, len(findings))
+                continue
+            for param, hinted in body_params.items():
+                classes = self._classes_for(hinted)
+                for finding in self._test_body_param(url, method, param, template, classes, baseline):
+                    findings.append(finding)
+                    if on_finding:
+                        on_finding(finding)
+                    if self._sent >= self.max_requests:
+                        return findings
+            if on_progress:
+                on_progress(i, total, self._sent, len(findings))
+        return findings
+
+    @staticmethod
+    def _has_body_hint(target: Dict[str, Any]) -> bool:
+        return any(hinted for hinted in (target.get("body_params") or {}).values())
+
+    def _test_body_param(self, url: str, method: str, param: str, template: Dict[str, Any],
+                         classes: List[str], baseline: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Tek body parametresi × sınıflar — query `_test_param`'ın body karşılığı
+        (detektörler/payload'lar ortak; istek JSON gövdeyle POST/PUT/PATCH)."""
+        out: List[Dict[str, Any]] = []
+        for cls in classes:
+            spec = P.CLASSES.get(cls)
+            if not spec:
+                continue
+            for meta in spec["payloads"]:
+                if self._sent >= self.max_requests:
+                    return out
+                if self._consecutive_blocked >= self.block_threshold:
+                    self.backoff_triggered = True
+                    return out
+                marker = P.make_marker()
+                payload = P.render_payload(meta["p"], marker)
+                resp = self._request_body(method, url, self._build_body(template, param, payload),
+                                          marker=marker)
+                if resp is None:
+                    continue
+                resp["baseline_elapsed"] = baseline["elapsed"]
+                resp["baseline_body"] = baseline.get("body", "")
+                evidence = spec["detect"](resp, meta)
+                if not evidence:
+                    continue
+                verdict = "fired"
+                if meta.get("t") == "time":
+                    lv, slope = self._timing_ladder_body(url, method, param, meta["p"],
+                                                         template, baseline)
+                    if lv == timing.NOT_FIRED:
+                        continue
+                    verdict = "fired" if lv == timing.FIRED else "inconclusive"
+                    evidence += f" · doz-yanıt eğimi={slope:.2f} ({lv})"
+                f = self._finding(cls, url, param, payload, evidence, meta, verdict)
+                f["method"] = method
+                f["location"] = "body"
+                f["reproduction"] = (f"{method} {url}  (JSON body alanı '{param}' = payload; "
+                                     f"Content-Type: application/json)")
+                out.append(f)
+                break   # sınıf başına ilk kanıt yeter
+        return out
+
+    def _timing_ladder_body(self, url: str, method: str, param: str, template_payload: str,
+                            template_body: Dict[str, Any], baseline: Dict[str, Any]) -> tuple:
+        """Body enjeksiyonu için doz merdiveni (query `_timing_ladder`'ın karşılığı)."""
+        measurements: Dict[float, List[float]] = {}
+        for dose in self.ladder_doses:
+            times: List[float] = []
+            for _ in range(self.ladder_rounds):
+                if self._sent >= self.max_requests:
+                    return timing.NOT_FIRED, 0.0
+                marker = P.make_marker()
+                payload = P.render_payload(template_payload, marker, sleep=dose)
+                resp = self._request_body(method, url, self._build_body(template_body, param, payload),
+                                          marker=marker)
+                if resp is not None:
+                    times.append(resp["elapsed"])
+            if times:
+                measurements[dose] = times
+        return timing.evaluate_ladder(list(self.ladder_doses), measurements)
+
+    @staticmethod
+    def _build_body(template: Dict[str, Any], param: str, payload: str) -> Dict[str, Any]:
+        """Body şablonunu kopyalar ve hedef alanı payload ile değiştirir (diğerleri korunur)."""
+        body = dict(template or {})
+        body[param] = payload
+        return body
+
     # ── OOB / OAST prob ekimi (kör zafiyetler) ────────────────────────────────
     def plant_oob(self, param_targets: List[Dict[str, Any]], oob,
                   on_progress: Optional[Callable[[int, int, int, int], None]] = None) -> int:
@@ -334,6 +453,40 @@ class ParamFuzzer:
         # 403/429 art arda geldiğinde WAF/rate-limit'e çarpmış olabiliriz —
         # sayacı burada güncelle, çağıran taraf (fuzz_targets/_test_param)
         # eşiği aşınca taramayı erken durdurur.
+        if resp.status_code in (403, 429):
+            self._consecutive_blocked += 1
+        else:
+            self._consecutive_blocked = 0
+        return {
+            "body": resp.text or "",
+            "headers": {k.lower(): v for k, v in resp.headers.items()},
+            "status": resp.status_code,
+            "elapsed": elapsed,
+            "baseline_elapsed": 0.0,
+            "baseline_body": "",
+            "marker": marker,
+        }
+
+    def _request_body(self, method: str, url: str, body: Dict[str, Any],
+                      marker: str = "") -> Optional[Dict[str, Any]]:
+        """`_request`'in JSON-body karşılığı: method + JSON gövdeyle istek atar, aynı ctx
+        sözlüğünü döner (detektörler için body/headers/status/elapsed/baseline_*)."""
+        import requests
+        if self.delay:
+            time.sleep(self.delay)
+        self._sent += 1
+        t0 = time.time()
+        try:
+            resp = self._session.request(method, url, headers=self.headers, json=body,
+                                         timeout=self.timeout, allow_redirects=False,
+                                         verify=self.verify_tls)
+        except requests.exceptions.Timeout:
+            return {"body": "", "headers": {}, "status": 0, "elapsed": float(self.timeout),
+                    "baseline_elapsed": 0.0, "baseline_body": "", "marker": marker,
+                    "timed_out": True}
+        except Exception:
+            return None
+        elapsed = time.time() - t0
         if resp.status_code in (403, 429):
             self._consecutive_blocked += 1
         else:
